@@ -1320,6 +1320,13 @@ fn tool_names_type_the_common_calls() {
             command: "ls -la".into()
         }
     );
+    let call = oc_tool_call("shell", &json!({"command": "Get-ChildItem"}));
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "Get-ChildItem".into()
+        }
+    );
     let call = oc_tool_call(
         "edit",
         &json!({"filePath": "/w/a.rs", "oldString": "a", "newString": "b"}),
