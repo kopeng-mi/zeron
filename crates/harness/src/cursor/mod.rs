@@ -778,6 +778,7 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
     match name {
         "shell" => ToolCall::Exec {
             command: s(&["command"]),
+            shell: None,
         },
         "read" => ToolCall::ReadFile {
             path: s(&["path", "filePath", "file_path"]),
@@ -1014,7 +1015,8 @@ mod tests {
         assert_eq!(
             decode_tool("shell", &json!({"command": "ls"})),
             ToolCall::Exec {
-                command: "ls".into()
+                command: "ls".into(),
+                shell: None,
             }
         );
         assert_eq!(

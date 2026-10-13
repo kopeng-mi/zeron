@@ -564,7 +564,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
-/// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
+/// Caps: Mcp/Unknown input at [`TOOL_INPUT_KEEP_BYTES`] (a subagent spawn keeps only its badge).
+/// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     match call {
@@ -581,17 +582,71 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             url: url.clone(),
             prompt: None,
         },
-        ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call),
+            input: kept_input(call, input.as_ref()),
         },
-        ToolCall::Unknown { name, .. } => ToolCall::Unknown {
+        ToolCall::Unknown { name, input } => ToolCall::Unknown {
             name: name.clone(),
-            input: spawn_badge(call),
+            input: kept_input(call, input.as_ref()),
         },
         other => other.clone(),
     }
+}
+
+/// Bytes of an MCP/unknown tool input kept in the doc, so its chip can show
+/// the arguments (or a code-mode snippet) on every device.
+pub const TOOL_INPUT_KEEP_BYTES: usize = 1024;
+
+/// The doc's copy of an MCP/unknown tool input: a spawn keeps only its
+/// [`spawn_badge`]; anything else is kept whole up to
+/// [`TOOL_INPUT_KEEP_BYTES`] of JSON, else its string values are cut to fit,
+/// else it becomes a cut JSON string. Idempotent: a kept input fits.
+fn kept_input(call: &ToolCall, input: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    if call.is_subagent_spawn() {
+        return spawn_badge(call);
+    }
+    let input = input?;
+    let fits = |v: &serde_json::Value| {
+        serde_json::to_string(v).map_or(false, |s| s.len() <= TOOL_INPUT_KEEP_BYTES)
+    };
+    if fits(input) {
+        return Some(input.clone());
+    }
+    if let serde_json::Value::Object(map) = input {
+        let strings = map.values().filter(|v| v.is_string()).count().max(1);
+        let budget = TOOL_INPUT_KEEP_BYTES / strings / 2;
+        let cut: serde_json::Map<String, serde_json::Value> = map
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(text) => (k.clone(), cut_str(text, budget).into()),
+                other => (k.clone(), other.clone()),
+            })
+            .collect();
+        let cut = serde_json::Value::Object(cut);
+        if fits(&cut) {
+            return Some(cut);
+        }
+    }
+    let text = serde_json::to_string(input).unwrap_or_default();
+    Some(cut_str(&text, TOOL_INPUT_KEEP_BYTES / 4).into())
+}
+
+/// `text` cut to at most `max` bytes on a char boundary, with an ellipsis.
+fn cut_str(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// The only slice of a tool input allowed into the doc: a subagent spawn's
@@ -804,6 +859,7 @@ mod tests {
                 id: "tool-1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
             },
         );
@@ -839,6 +895,7 @@ mod tests {
             id: "t".into(),
             call: ToolCall::Exec {
                 command: "ls".into(),
+                shell: None,
             },
         };
         let mut once = Vec::new();
@@ -857,6 +914,7 @@ mod tests {
                 id: "t".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
             },
         );
@@ -925,21 +983,46 @@ mod tests {
         assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
-    /// An ordinary tool's input still goes, even when it happens to carry a
-    /// `model` argument — the badge is gated on the spawn genus, not the key.
+    /// An ordinary tool keeps a small input whole, even when it carries a
+    /// `model` argument: the badge is gated on the spawn genus, not the key.
     #[test]
-    fn sanitize_still_strips_a_non_spawn_carrying_a_model_argument() {
+    fn sanitize_keeps_a_small_non_spawn_input_whole() {
+        let input = serde_json::json!({ "model": "haiku", "code": "return 1;" });
         let call = ToolCall::Unknown {
-            name: "SomeTool".into(),
-            input: Some(serde_json::json!({ "model": "haiku", "prompt": "secret" })),
+            name: "execute".into(),
+            input: Some(input.clone()),
         };
+        let clean = sanitize_tool_call(&call);
         assert_eq!(
-            sanitize_tool_call(&call),
+            clean,
             ToolCall::Unknown {
-                name: "SomeTool".into(),
-                input: None,
+                name: "execute".into(),
+                input: Some(input),
             }
         );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    /// A large MCP input is cut to fit [`TOOL_INPUT_KEEP_BYTES`], and cutting
+    /// again changes nothing.
+    #[test]
+    fn sanitize_caps_a_large_tool_input() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "write".into(),
+            input: Some(serde_json::json!({ "path": "a.txt", "text": "é".repeat(4000) })),
+        };
+        let clean = sanitize_tool_call(&call);
+        let ToolCall::Mcp {
+            input: Some(input), ..
+        } = &clean
+        else {
+            panic!("input kept");
+        };
+        assert!(serde_json::to_string(input).unwrap().len() <= TOOL_INPUT_KEEP_BYTES);
+        assert_eq!(input["path"], "a.txt");
+        assert!(input["text"].as_str().unwrap().ends_with('…'));
+        assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
     /// A spawn that named no model keeps no input at all — `None`, not an
@@ -973,6 +1056,7 @@ mod tests {
                 id: "tool-1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
                 is_error: false,
                 resolved: true,
@@ -1079,6 +1163,7 @@ mod tests {
                 id: "t".into(),
                 call: ToolCall::Exec {
                     command: "cargo test".into(),
+                    shell: None,
                 },
             },
         );
@@ -1126,6 +1211,7 @@ mod tests {
                 id: "t1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
             },
         );
@@ -1269,6 +1355,7 @@ mod tests {
                 id: "toolu_bash".into(),
                 call: ToolCall::Exec {
                     command: "git clone …".into(),
+                    shell: None,
                 },
             },
         );

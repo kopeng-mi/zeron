@@ -405,6 +405,10 @@ pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 pub enum ToolCall {
     Exec {
         command: String,
+        /// The shell the agent ran it in (`Bash`, `PowerShell`), when its
+        /// tool says so. Absent on older docs and shell-agnostic agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
     },
     ReadFile {
         path: String,
@@ -824,6 +828,7 @@ mod tests {
             id: "t1".into(),
             call: ToolCall::Exec {
                 command: "cargo test".into(),
+                shell: None,
             },
         };
         let json = serde_json::to_string(&ev).unwrap();

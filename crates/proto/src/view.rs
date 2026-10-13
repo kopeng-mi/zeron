@@ -499,7 +499,9 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     use crate::ToolCall;
     match call {
-        ToolCall::Exec { command } => ("Run", command.clone()),
+        // The command itself is the open chip's first section; the header
+        // names the shell it ran in.
+        ToolCall::Exec { shell, .. } => ("Run", shell.clone().unwrap_or_else(|| "Shell".into())),
         ToolCall::ReadFile { path } => ("Read", path.clone()),
         ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
         ToolCall::EditFile { path, .. } => ("Edit", path.clone()),
@@ -528,6 +530,8 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
             Some(description) => ("Agent", description.to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
+            // opencode's code mode: a JS snippet that calls MCP tools.
+            None if name == "execute" => ("Run", "code".into()),
             None => ("Tool", name.clone()),
         },
     }

@@ -44,6 +44,7 @@ fn main() {
             id: "tool-1".into(),
             call: ToolCall::Exec {
                 command: "cargo test".into(),
+                shell: None,
             },
         },
     );

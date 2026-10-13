@@ -290,6 +290,7 @@ impl Harness for MockHarness {
                         id: "mock-think-tool".into(),
                         call: zeron_proto::ToolCall::Exec {
                             command: "rg -n walletInsufficient apps/word/src | wc -l".into(),
+                            shell: None,
                         },
                     },
                     AgentEvent::ToolResult {
@@ -382,6 +383,7 @@ impl Harness for MockHarness {
                             id: "sub1-grep".into(),
                             call: zeron_proto::ToolCall::Exec {
                                 command: "grep -rn fold_event_into_parts crates".into(),
+                                shell: None,
                             },
                         },
                     ),
@@ -424,6 +426,7 @@ impl Harness for MockHarness {
                             id: "sub2-burst".into(),
                             call: zeron_proto::ToolCall::Exec {
                                 command: "cargo test -p zeron-doc cadence_burst -- --nocapture".into(),
+                                shell: None,
                             },
                         },
                     ),
@@ -457,6 +460,7 @@ impl Harness for MockHarness {
                             call: zeron_proto::ToolCall::Exec {
                                 command: "cargo test -p zeron-doc cadence_steer -- --nocapture"
                                     .into(),
+                                shell: None,
                             },
                         },
                     ),
@@ -493,6 +497,7 @@ impl Harness for MockHarness {
                         id: "mock-code-tool".into(),
                         call: zeron_proto::ToolCall::Exec {
                             command: "set -e\nfixture_in_original=0\ngrep -rn \"veil\" crates/ui/src | wc -l".into(),
+                            shell: None,
                         },
                     },
                     AgentEvent::ToolResult {

@@ -2579,6 +2579,7 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
         id: "tool-1".into(),
         call: ToolCall::Exec {
             command: "echo late-echo".into(),
+            shell: None,
         },
     });
     script.push(AgentEvent::TextDelta {
@@ -2645,6 +2646,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             id: "tool-long".into(),
             call: ToolCall::Exec {
                 command: "sleep 60".into(),
+                shell: None,
             },
         },
         AgentEvent::Steered {
@@ -2660,6 +2662,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             id: "tool-long".into(),
             call: ToolCall::Exec {
                 command: "sleep 60".into(),
+                shell: None,
             },
         },
         AgentEvent::ToolResult {

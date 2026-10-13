@@ -1692,6 +1692,7 @@ mod tests {
                 "toolu_bash",
                 zeron_proto::ToolCall::Exec {
                     command: "git clone …".into(),
+                    shell: None,
                 },
             ),
             tool(
@@ -1830,6 +1831,7 @@ mod tests {
                 id: "tool-1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
             },
         );
@@ -1943,6 +1945,7 @@ mod tests {
                 id: "t1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
             },
         );
@@ -2005,6 +2008,7 @@ mod tests {
                 id: "t1".into(),
                 call: ToolCall::Exec {
                     command: "ls".into(),
+                    shell: None,
                 },
                 is_error: false,
                 resolved: true,

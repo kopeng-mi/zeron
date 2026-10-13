@@ -4522,6 +4522,7 @@ mod tests {
         assert_eq!(
             tool_file_path(&ToolCall::Exec {
                 command: "cargo test".into(),
+                shell: None,
             }),
             None
         );

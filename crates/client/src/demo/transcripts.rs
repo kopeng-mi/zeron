@@ -65,6 +65,7 @@ fn edit(id: &str, path: &str, additions: u64, deletions: u64) -> MessagePart {
 fn exec(command: &str) -> ToolCall {
     ToolCall::Exec {
         command: command.into(),
+        shell: None,
     }
 }
 

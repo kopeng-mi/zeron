@@ -482,6 +482,7 @@ fn grok_tool_call(name: &str, args: &Value) -> ToolCall {
     match name {
         "run_terminal_command" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
+            shell: None,
         },
         "read_file" => ToolCall::ReadFile {
             path: s(&["target_file", "file_path", "path"]).unwrap_or_default(),
@@ -717,7 +718,8 @@ mod tests {
         assert_eq!(
             call,
             ToolCall::Exec {
-                command: "ls -la".into()
+                command: "ls -la".into(),
+                shell: None,
             }
         );
         let call = grok_tool_call("grep", &json!({"pattern": "0\\.1", "glob": "*.rs"}));

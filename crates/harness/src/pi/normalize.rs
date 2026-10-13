@@ -182,6 +182,7 @@ fn tool(name: &str, args: &Value) -> ToolCall {
     match name {
         "bash" => ToolCall::Exec {
             command: string(args, "command").into(),
+            shell: None,
         },
         "read" => ToolCall::ReadFile {
             path: string(args, "path").into(),

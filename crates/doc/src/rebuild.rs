@@ -167,6 +167,7 @@ mod tests {
                     id: format!("{id}-tool"),
                     call: ToolCall::Exec {
                         command: "cargo test".into(),
+                        shell: None,
                     },
                     is_error: false,
                     resolved: true,

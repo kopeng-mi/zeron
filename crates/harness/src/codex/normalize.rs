@@ -330,6 +330,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 id,
                 call: ToolCall::Exec {
                     command: str_field(item, &["command"]),
+                    shell: None,
                 },
             }],
             Phase::Completed => {
@@ -800,7 +801,8 @@ mod tests {
             vec![AgentEvent::ToolCall {
                 id: "c1".into(),
                 call: ToolCall::Exec {
-                    command: "ls".into()
+                    command: "ls".into(),
+                    shell: None,
                 },
             }]
         );

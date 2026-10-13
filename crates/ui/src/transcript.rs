@@ -786,6 +786,17 @@ pub enum ToolDetail {
 /// Max verbatim output lines per chip before the counted tail row.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
 
+/// Max verbatim output lines a shell chip keeps. Its box scrolls, so it holds
+/// more than [`OUTPUT_DETAIL_MAX_LINES`], but stays bounded: the full output
+/// is a "Show full output" fetch away.
+pub const SHELL_OUTPUT_MAX_LINES: usize = 100;
+
+/// Output rows a shell chip shows before its box scrolls.
+const SHELL_OUTPUT_VIEW_LINES: usize = 12;
+
+/// Height of a code chip's section label row ("Command", "Output").
+const SHELL_SECTION_HEIGHT: f32 = 22.0;
+
 /// Max diff lines an inline tool-diff detail renders — the detail is one
 /// stacked element inside its transcript row, so it must stay bounded
 /// (~600 lines ≈ 12.6k px, several screens of context before the cut).
@@ -830,7 +841,29 @@ pub fn tool_detail(
             stats: Arc::new(stats.to_vec()),
         });
     }
-    let output = output?;
+    output_detail(output?, OUTPUT_DETAIL_MAX_LINES)
+}
+
+/// [`tool_detail`] for one doc tool part. A code chip's output keeps up to
+/// [`SHELL_OUTPUT_MAX_LINES`]: its box scrolls instead of growing.
+fn part_detail(
+    call: &ToolCall,
+    output: Option<&str>,
+    diff: Option<&zeron_proto::ToolDiff>,
+    diff_stats: Option<&[zeron_doc::ToolDiffStat]>,
+) -> Option<ToolDetail> {
+    if code_section(call).is_some()
+        && diff.is_none()
+        && diff_stats.is_none_or(|s| s.is_empty())
+    {
+        return output_detail(output?, SHELL_OUTPUT_MAX_LINES);
+    }
+    tool_detail(output, diff, diff_stats)
+}
+
+/// Output as verbatim lines, trailing blanks trimmed, capped at `max_lines`
+/// with a counted tail.
+fn output_detail(output: &str, max_lines: usize) -> Option<ToolDetail> {
     let mut lines: Vec<SharedString> = output.lines().map(output_line).collect();
     // Trim trailing blank output lines so the block hugs its content.
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
@@ -839,8 +872,8 @@ pub fn tool_detail(
     if lines.is_empty() {
         return None;
     }
-    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
-    lines.truncate(OUTPUT_DETAIL_MAX_LINES);
+    let truncated_by = lines.len().saturating_sub(max_lines);
+    lines.truncate(max_lines);
     Some(ToolDetail::Output {
         lines,
         truncated_by,
@@ -883,7 +916,8 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
 /// code-block payload so rendering and height stay one implementation.
 pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     let text: String = match call {
-        ToolCall::Exec { command } => command.clone(),
+        _ if let Some((_, _, source)) = code_section(call) => source,
+        ToolCall::Exec { command, .. } => command.clone(),
         ToolCall::ReadFile { path } => path.clone(),
         ToolCall::WriteFile { path, content } => match content {
             Some(content) => format!("{path}\n{content}"),
@@ -1469,8 +1503,13 @@ pub fn rows_for_entry(
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                        .map(Arc::new),
+                    detail: part_detail(
+                        call,
+                        output.as_deref(),
+                        diff.as_ref(),
+                        diff_stats.as_deref(),
+                    )
+                    .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
@@ -2171,6 +2210,132 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
     };
     DETAIL_SEPARATOR + body
+}
+
+/// A code chip: its open card splits into a highlighted code section and a
+/// scrolling "Output" section that folds on its own.
+fn is_code_chip(tool: &ToolItem) -> bool {
+    tool.kind == ToolItemKind::Call && code_section(&tool.call).is_some()
+}
+
+/// A code chip's first section: its label, the language it is colored as,
+/// and the source [`call_block`] wraps. Shell commands, opencode code-mode
+/// snippets, and MCP/unknown tool input (as JSON). Subagent spawns are links,
+/// not code.
+fn code_section(call: &ToolCall) -> Option<(&'static str, Lang, String)> {
+    match call {
+        ToolCall::Exec { command, .. } => Some(("Command", Lang::Bash, command.clone())),
+        ToolCall::Unknown {
+            name,
+            input: Some(input),
+        } if name == "execute"
+            && let Some(code) = input.get("code").and_then(serde_json::Value::as_str) =>
+        {
+            Some(("Code", Lang::JavaScript, code.to_owned()))
+        }
+        ToolCall::Mcp {
+            input: Some(input), ..
+        }
+        | ToolCall::Unknown {
+            input: Some(input), ..
+        } if !call.is_subagent_spawn() => Some((
+            "Input",
+            Lang::Json,
+            serde_json::to_string_pretty(input).unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+/// Height of a shell chip's output box before it scrolls.
+fn shell_output_view_height() -> f32 {
+    SHELL_OUTPUT_VIEW_LINES as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+}
+
+/// Analytic height a shell chip's command section adds: [`detail_height`]
+/// plus its label row.
+fn shell_command_height(invocation: &ToolDetail) -> f32 {
+    detail_height(invocation) + SHELL_SECTION_HEIGHT
+}
+
+/// Analytic height a shell chip's output section adds: separator, label row
+/// and, while open, the box capped at [`shell_output_view_height`]. A diff
+/// or stats detail keeps its own height.
+fn shell_output_height(detail: &ToolDetail, open: bool) -> f32 {
+    if !matches!(detail, ToolDetail::Output { .. }) {
+        return detail_height(detail);
+    }
+    let body = detail_height(detail) - DETAIL_SEPARATOR;
+    DETAIL_SEPARATOR
+        + SHELL_SECTION_HEIGHT
+        + if open {
+            body.min(shell_output_view_height())
+        } else {
+            0.0
+        }
+}
+
+/// Syntax runs for each wrapped line of a shell command's [`call_block`], in
+/// the same order. Each source line is highlighted whole, then cut at the
+/// [`CALL_WRAP_COLS`] boundaries `wrap_cols` used, so a wrapped string or
+/// word keeps its color. A line whose spans don't cover it exactly stays
+/// plain.
+fn shell_command_runs(
+    command: &str,
+    doc: &zeron_syntax::HighlightedDocument,
+    theme: &Theme,
+) -> Vec<Vec<TextRun>> {
+    let mono = gpui::font(theme.font_mono.clone());
+    let mut out = Vec::new();
+    for (line_ix, line) in command.lines().enumerate() {
+        if line.is_empty() {
+            out.push(Vec::new());
+            continue;
+        }
+        let spans = doc.lines.get(line_ix).map(Vec::as_slice).unwrap_or(&[]);
+        let spans_fit = spans
+            .iter()
+            .all(|s| s.range.end <= line.len() && line.is_char_boundary(s.range.start));
+        let runs = if spans_fit {
+            render::runs_for_syntax_line_with_plain(line, spans, &mono, theme.text_muted, theme)
+        } else {
+            Vec::new()
+        };
+        let runs = if runs.iter().map(|r| r.len).sum::<usize>() == line.len() {
+            runs
+        } else {
+            render::runs_for_syntax_line_with_plain(line, &[], &mono, theme.text_muted, theme)
+        };
+        let mut ends: Vec<usize> = line
+            .char_indices()
+            .map(|(at, _)| at)
+            .step_by(CALL_WRAP_COLS)
+            .skip(1)
+            .collect();
+        ends.push(line.len());
+        let mut runs = runs.into_iter();
+        let mut carry: Option<TextRun> = None;
+        let mut at = 0;
+        for end in ends {
+            let mut chunk = Vec::new();
+            while at < end {
+                let Some(mut run) = carry.take().or_else(|| runs.next()) else {
+                    break;
+                };
+                let take = (end - at).min(run.len);
+                if take < run.len {
+                    let mut rest = run.clone();
+                    rest.len -= take;
+                    run.len = take;
+                    carry = Some(rest);
+                }
+                at += take;
+                chunk.push(run);
+            }
+            out.push(chunk);
+        }
+    }
+    out
 }
 
 /// Tool image preview frame height; widths follow each image's aspect.
@@ -3169,6 +3334,12 @@ pub struct Transcript {
     /// group fold. Render-local like `folds` — never part of the row
     /// fingerprint.
     tool_details: HashMap<SharedString, FoldState>,
+    /// Shell chips whose output section the user folded shut, keyed like
+    /// `tool_details`. Render-local, never part of the row fingerprint.
+    closed_shell_outputs: HashSet<SharedString>,
+    /// Scroll position of each shell chip's output box, keyed like
+    /// `tool_details`.
+    shell_output_scrolls: HashMap<SharedString, gpui::ScrollHandle>,
     /// Expand/collapse state for user bubbles past [`USER_COLLAPSED_LINES`],
     /// keyed by row id. Render-local like `folds` — never part of the row
     /// fingerprint, so toggling one costs a repaint, not a rebuild.
@@ -3572,6 +3743,8 @@ impl Transcript {
             last_replay_baseline: None,
             historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
+            closed_shell_outputs: HashSet::new(),
+            shell_output_scrolls: HashMap::new(),
             user_folds: HashMap::new(),
             user_heights: HashMap::new(),
             user_hold_task: None,
@@ -8037,6 +8210,33 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
+        // Shell chips: whether the output section is open, and the command's
+        // highlighted runs (requested only while the chip is open).
+        let shell_output_opens: Vec<bool> = (0..tools.len())
+            .map(|ix| {
+                !self
+                    .closed_shell_outputs
+                    .contains(&SharedString::from(format!("{row_id}#d{ix}")))
+            })
+            .collect();
+        let shell_commands: Vec<Option<Vec<Vec<TextRun>>>> = tools
+            .iter()
+            .enumerate()
+            .map(|(ix, tool)| {
+                if !detail_opens[ix] || tool.kind != ToolItemKind::Call {
+                    return None;
+                }
+                let (_, lang, source) = code_section(&tool.call)?;
+                let doc = self.highlights.request(
+                    format!("{row_id}#cmd{ix}").into(),
+                    0,
+                    lang,
+                    &source,
+                    cx,
+                )?;
+                Some(shell_command_runs(&source, &doc, theme))
+            })
+            .collect();
         let base_row_height = if collapses {
             TOOL_TREE_ROW_HEIGHT
         } else {
@@ -8050,17 +8250,31 @@ impl Transcript {
             .zip(&detail_opens)
             .zip(&detail_folds)
             .zip(tools.iter())
+            .zip(&shell_output_opens)
             .map(
-                |(((((detail, invocation), affordance), open), fold), tool)| {
+                |((((((detail, invocation), affordance), open), fold), tool), output_open)| {
+                    let shell = is_code_chip(tool);
                     let target = if *open {
                         base_row_height
-                            + invocation.as_deref().map_or(0.0, detail_height)
+                            + invocation.as_deref().map_or(0.0, |invocation| {
+                                if shell {
+                                    shell_command_height(invocation)
+                                } else {
+                                    detail_height(invocation)
+                                }
+                            })
                             + if chip_has_images(tool) {
                                 TOOL_IMAGE_STRIP_HEIGHT
                             } else {
                                 0.0
                             }
-                            + detail.as_deref().map_or(0.0, detail_height)
+                            + detail.as_deref().map_or(0.0, |detail| {
+                                if shell {
+                                    shell_output_height(detail, *output_open)
+                                } else {
+                                    detail_height(detail)
+                                }
+                            })
                             + if affordance.is_some() {
                                 BLOB_AFFORDANCE_HEIGHT
                             } else {
@@ -8382,7 +8596,56 @@ impl Transcript {
                         .flex()
                         .flex_col()
                         .overflow_hidden();
+                    let shell = is_code_chip(tool);
                     if let Some(invocation) = invocation.as_deref() {
+                        panel = panel.child(
+                            div()
+                                .h(px(DETAIL_SEPARATOR))
+                                .flex_none()
+                                .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
+                        );
+                        panel = if shell {
+                            panel
+                                .child(shell_section_label(
+                                    code_section(&tool.call).map_or("Command", |c| c.0).into(),
+                                    None,
+                                    theme,
+                                ))
+                                .child(shell_command_body(
+                                    invocation,
+                                    shell_commands[ix].as_deref(),
+                                    matches!(tool.call, ToolCall::Exec { .. }),
+                                    &format!("{key}-call"),
+                                    theme,
+                                ))
+                        } else {
+                            panel.child(detail_body(
+                                invocation,
+                                None,
+                                &format!("{key}-call"),
+                                theme,
+                            ))
+                        };
+                    }
+                    if let Some(images) = chip_images[ix].clone() {
+                        panel = panel.child(
+                            self.render_tool_image_strip(&key, images, collapses, theme, cx),
+                        );
+                    }
+                    if let Some(detail) = detail.as_deref()
+                        && shell
+                        && let ToolDetail::Output {
+                            lines,
+                            truncated_by,
+                        } = detail
+                    {
+                        let output_open = shell_output_opens[ix];
+                        let count = lines.len() + truncated_by;
+                        let label = SharedString::from(format!(
+                            "Output · {count} line{}",
+                            if count == 1 { "" } else { "s" }
+                        ));
+                        let fold_key = key.clone();
                         panel = panel
                             .child(
                                 div()
@@ -8390,14 +8653,33 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, &format!("{key}-call"), theme));
-                    }
-                    if let Some(images) = chip_images[ix].clone() {
-                        panel = panel.child(
-                            self.render_tool_image_strip(&key, images, collapses, theme, cx),
-                        );
-                    }
-                    if let Some(detail) = detail.as_deref() {
+                            .child(
+                                shell_section_label(label, Some(output_open), theme)
+                                    .id(SharedString::from(format!("{key}-out-fold")))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.text_muted))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        if !this.closed_shell_outputs.remove(&fold_key) {
+                                            this.closed_shell_outputs.insert(fold_key.clone());
+                                        }
+                                        cx.notify();
+                                    })),
+                            );
+                        if output_open {
+                            let scroll = self
+                                .shell_output_scrolls
+                                .entry(key.clone())
+                                .or_default()
+                                .clone();
+                            panel = panel.child(shell_output_box(
+                                detail,
+                                &scroll,
+                                &format!("{key}-out"),
+                                theme,
+                            ));
+                        }
+                    } else if let Some(detail) = detail.as_deref() {
                         panel = panel
                             .child(
                                 div()
@@ -9237,6 +9519,155 @@ fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
         .text_size(px(TOOL_TEXT_SIZE))
         .text_color(theme.text_faint)
         .child(SharedString::from(format!("… {truncated_by} more lines")))
+}
+
+/// The label row heading a shell chip's "Command" / "Output" section. `open`
+/// adds a disclosure arrow for a section that folds on its own.
+fn shell_section_label(label: SharedString, open: Option<bool>, theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(SHELL_SECTION_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(TOOL_TEXT_SIZE - 1.0))
+        .text_color(theme.text_faint)
+        .when_some(open, |row, open| {
+            row.child(
+                crate::icons::icon(if open {
+                    crate::icons::ALT_ARROW_DOWN
+                } else {
+                    crate::icons::ALT_ARROW_RIGHT
+                })
+                .size(px(10.0))
+                .text_color(theme.text_faint),
+            )
+        })
+        .child(label)
+}
+
+/// A code chip's source lines with syntax colors; shell commands also get a
+/// `$` prompt in the gutter (outside the selectable text, so copying gives
+/// the bare command). Falls back to plain lines until the highlight lands.
+fn shell_command_body(
+    invocation: &ToolDetail,
+    runs: Option<&[Vec<TextRun>]>,
+    prompt: bool,
+    selection_key: &str,
+    theme: &Theme,
+) -> AnyElement {
+    let ToolDetail::Output {
+        lines,
+        truncated_by,
+    } = invocation
+    else {
+        return detail_body(invocation, None, selection_key, theme);
+    };
+    let mono = gpui::font(theme.font_mono.clone());
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .py(px(6.0))
+        .font_family(theme.font_mono.clone())
+        .text_size(px(TOOL_TEXT_SIZE))
+        .children(lines.iter().enumerate().map(|(line_ix, line)| {
+            let row = div()
+                .h(px(OUTPUT_LINE_HEIGHT))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .when(prompt, |row| {
+                    row.child(
+                        div()
+                            .w(px(14.0))
+                            .flex_none()
+                            .text_color(theme.text_faint)
+                            .when(line_ix == 0, |gutter| gutter.child("$")),
+                    )
+                });
+            if line.is_empty() {
+                return row;
+            }
+            let line_runs = runs
+                .and_then(|runs| runs.get(line_ix))
+                .filter(|r| r.iter().map(|run| run.len).sum::<usize>() == line.len())
+                .cloned()
+                .unwrap_or_else(|| {
+                    render::runs_for_syntax_line_with_plain(
+                        line,
+                        &[],
+                        &mono,
+                        theme.text_muted,
+                        theme,
+                    )
+                });
+            row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(render::selectable_text_element(
+                        format!("{selection_key}-{line_ix}").into(),
+                        line.clone(),
+                        line_runs,
+                        theme.selection,
+                    )),
+            )
+        }))
+        .when(*truncated_by > 0, |block| {
+            block.child(more_lines_row(*truncated_by, theme))
+        })
+        .into_any_element()
+}
+
+/// A shell chip's output in a box capped at [`shell_output_view_height`].
+/// Taller output scrolls inside it, with a thumb showing where you are.
+fn shell_output_box(
+    detail: &ToolDetail,
+    scroll: &gpui::ScrollHandle,
+    selection_key: &str,
+    theme: &Theme,
+) -> AnyElement {
+    let body = detail_body(detail, None, selection_key, theme);
+    let content = detail_height(detail) - DETAIL_SEPARATOR;
+    let view = shell_output_view_height();
+    if content <= view {
+        return body;
+    }
+    let thumb = (view * view / content).max(18.0);
+    let max_scroll = content - view;
+    let scrolled = (-f32::from(scroll.offset().y)).clamp(0.0, max_scroll);
+    let thumb_top = scrolled / max_scroll * (view - thumb);
+    div()
+        .relative()
+        .h(px(view))
+        .flex_none()
+        .min_w_0()
+        .child(
+            div()
+                .id(SharedString::from(format!("{selection_key}-scroll")))
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .pr(px(10.0))
+                .child(body),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(thumb_top))
+                .right(px(2.0))
+                .w(px(4.0))
+                .h(px(thumb))
+                .rounded(px(2.0))
+                .bg(crate::theme::hairline(0.22)),
+        )
+        .into_any_element()
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body
@@ -12605,6 +13036,7 @@ mod tests {
             id: id.into(),
             call: ToolCall::Exec {
                 command: command.into(),
+                shell: None,
             },
             is_error: false,
             resolved: true,
@@ -15374,7 +15806,10 @@ mod tests {
     fn tool_group_summaries() {
         let exec = |c: &str| ToolItem {
             part_id: "fixture".into(),
-            call: ToolCall::Exec { command: c.into() },
+            call: ToolCall::Exec {
+                command: c.into(),
+                shell: None,
+            },
             is_error: false,
             resolved: true,
             detail: None,
@@ -15525,7 +15960,8 @@ mod tests {
         // Non-spawn-shaped calls stay generic.
         assert_eq!(
             subagent_tab_title(&ToolCall::Exec {
-                command: "ls".into()
+                command: "ls".into(),
+                shell: None,
             })
             .as_ref(),
             "Subagent"
@@ -15536,9 +15972,24 @@ mod tests {
     fn tool_chip_labels_per_kind() {
         assert_eq!(
             tool_chip_content(&ToolCall::Exec {
-                command: "cargo test".into()
+                command: "cargo test".into(),
+                shell: None,
             }),
-            ("Run", "cargo test".to_string())
+            ("Run", "Shell".to_string())
+        );
+        assert_eq!(
+            tool_chip_content(&ToolCall::Exec {
+                command: "Get-ChildItem".into(),
+                shell: Some("PowerShell".into()),
+            }),
+            ("Run", "PowerShell".to_string())
+        );
+        assert_eq!(
+            tool_chip_content(&ToolCall::Unknown {
+                name: "execute".into(),
+                input: None,
+            }),
+            ("Run", "code".to_string())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Search {
@@ -15707,15 +16158,16 @@ mod tests {
     }
 
     #[test]
-    fn multiline_command_flattens_to_one_chip_line() {
-        // The user's breaker: a multi-line script in a Run chip. The detail
-        // must come out as ONE sanitized line — the chip's fixed 30px card
-        // then truncates it with an ellipsis like the original's CSS.
+    fn multiline_command_keeps_a_one_line_chip() {
+        // A multi-line script in a Run chip: the header names the shell (one
+        // line, the chip's fixed 30px card) and the script lives in the open
+        // card's Command section.
         let (label, detail) = tool_chip_content(&ToolCall::Exec {
             command: "set -e\nfixture_in_original=0\n\tgrep -c  \"x\"".into(),
+            shell: None,
         });
         assert_eq!(label, "Run");
-        assert_eq!(detail, "set -e fixture_in_original=0 grep -c \"x\"");
+        assert_eq!(detail, "Shell");
         assert!(!detail.contains('\n'));
         // The chip row height is a constant, independent of content shape.
         assert_eq!(chips_height(1), CHIPS_TOP_PAD + CHIP_HEIGHT);
@@ -15727,6 +16179,53 @@ mod tests {
     }
 
     #[test]
+    fn shell_output_keeps_more_lines_but_stays_bounded() {
+        let long: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        let exec = ToolCall::Exec {
+            command: "ls".into(),
+            shell: None,
+        };
+        let Some(ToolDetail::Output {
+            lines,
+            truncated_by,
+        }) = part_detail(&exec, Some(&long), None, None)
+        else {
+            panic!("shell output should be an output block");
+        };
+        assert_eq!(lines.len(), SHELL_OUTPUT_MAX_LINES);
+        assert_eq!(truncated_by, 400 - SHELL_OUTPUT_MAX_LINES);
+        // Other tools keep the short cap.
+        let read = ToolCall::ReadFile { path: "a".into() };
+        let Some(ToolDetail::Output { lines, .. }) = part_detail(&read, Some(&long), None, None)
+        else {
+            panic!("read output should be an output block");
+        };
+        assert_eq!(lines.len(), OUTPUT_DETAIL_MAX_LINES);
+    }
+
+    #[test]
+    fn shell_output_box_caps_its_height_and_folds_to_its_label() {
+        let detail = |n: usize| ToolDetail::Output {
+            lines: (0..n).map(|i| SharedString::from(i.to_string())).collect(),
+            truncated_by: 0,
+        };
+        let small = detail(3);
+        assert_eq!(
+            shell_output_height(&small, true),
+            detail_height(&small) + SHELL_SECTION_HEIGHT
+        );
+        let big = detail(80);
+        assert_eq!(
+            shell_output_height(&big, true),
+            DETAIL_SEPARATOR + SHELL_SECTION_HEIGHT + shell_output_view_height()
+        );
+        assert_eq!(
+            shell_output_height(&big, false),
+            DETAIL_SEPARATOR + SHELL_SECTION_HEIGHT
+        );
+    }
+
+    #[test]
     fn call_block_carries_the_full_invocation() {
         // Multi-line command: verbatim lines, not the flattened chip line.
         let Some(ToolDetail::Output {
@@ -15734,6 +16233,7 @@ mod tests {
             truncated_by,
         }) = call_block(&ToolCall::Exec {
             command: "set -e\ncargo test".into(),
+            shell: None,
         })
         else {
             panic!("expected an output block")
@@ -15747,13 +16247,15 @@ mod tests {
         // A long single-line command soft-wraps instead of ellipsizing.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Exec {
             command: "x".repeat(CALL_WRAP_COLS * 2 + 10),
+            shell: None,
         }) else {
             panic!("expected an output block")
         };
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|l| l.chars().count() <= CALL_WRAP_COLS));
 
-        // MCP input pretty-prints under the `server · tool` line.
+        // MCP input pretty-prints alone: the header already names
+        // `server · tool`.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Mcp {
             server: "gh".into(),
             tool: "issues".into(),
@@ -15761,7 +16263,7 @@ mod tests {
         }) else {
             panic!("expected an output block")
         };
-        assert_eq!(lines[0].as_ref(), "gh · issues");
+        assert_eq!(lines[0].as_ref(), "{");
         assert!(lines.iter().any(|l| l.contains("\"repo\": \"zeron\"")));
 
         // Todos list one item per line with checkbox state.
@@ -15782,7 +16284,8 @@ mod tests {
         // Blank invocation → no block; the chip stays a plain card.
         assert!(
             call_block(&ToolCall::Exec {
-                command: "  \n ".into()
+                command: "  \n ".into(),
+                shell: None,
             })
             .is_none()
         );

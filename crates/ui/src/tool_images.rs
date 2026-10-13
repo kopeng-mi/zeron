@@ -124,7 +124,7 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
         | ToolCall::WriteFile { path, .. }
         | ToolCall::EditFile { path, .. }
         | ToolCall::ApplyPatch { path: Some(path) } => push_path(&mut out, path),
-        ToolCall::Exec { command } => push_text_paths(&mut out, command),
+        ToolCall::Exec { command, .. } => push_text_paths(&mut out, command),
         ToolCall::Mcp {
             input: Some(input), ..
         }
@@ -627,7 +627,8 @@ mod tests {
         assert_eq!(
             paths(
                 ToolCall::Exec {
-                    command: "python plot.py --out=chart.png".into()
+                    command: "python plot.py --out=chart.png".into(),
+                    shell: None,
                 },
                 Some("Saved to /tmp/x/chart.png.\nsee https://a.b/c.png and **/*.jpg")
             ),
@@ -646,7 +647,14 @@ mod tests {
         );
         let many = (0..9).map(|i| format!("{i}.jpg ")).collect::<String>();
         assert_eq!(
-            paths(ToolCall::Exec { command: many }, None).len(),
+            paths(
+                ToolCall::Exec {
+                    command: many,
+                    shell: None
+                },
+                None
+            )
+            .len(),
             MAX_IMAGES_PER_TOOL
         );
     }
@@ -679,6 +687,7 @@ mod tests {
         let found = paths(
             ToolCall::Exec {
                 command: "open ok.png".into(),
+                shell: None,
             },
             Some(&output),
         );
@@ -696,7 +705,8 @@ mod tests {
         assert_eq!(
             paths(
                 ToolCall::Exec {
-                    command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into()
+                    command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into(),
+                    shell: None,
                 },
                 None
             ),

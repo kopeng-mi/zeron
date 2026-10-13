@@ -412,6 +412,7 @@ async fn open_tool_call_never_quiesces() {
             id: "tool-slow".into(),
             call: ToolCall::Exec {
                 command: "cargo build --release".into(),
+                shell: None,
             },
         })
         .unwrap();
@@ -467,6 +468,7 @@ async fn stale_tool_echo_stays_parked() {
             id: "tool-echoed".into(),
             call: ToolCall::Exec {
                 command: "sleep 600".into(),
+                shell: None,
             },
         })
         .unwrap();
@@ -497,6 +499,7 @@ async fn stale_tool_echo_stays_parked() {
             id: "tool-echoed".into(),
             call: ToolCall::Exec {
                 command: "sleep 600".into(),
+                shell: None,
             },
         })
         .unwrap();

@@ -155,7 +155,7 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<String> {
 /// The full invocation the header truncates (desktop `call_block`).
 fn call_text(call: &ToolCall) -> String {
     match call {
-        ToolCall::Exec { command } => command.clone(),
+        ToolCall::Exec { command, .. } => command.clone(),
         ToolCall::ReadFile { path } => path.clone(),
         ToolCall::WriteFile { path, content } => match content {
             Some(c) => format!("{path}\n{c}"),
@@ -1172,9 +1172,9 @@ mod tests {
     #[test]
     fn summary_matches_desktop_wording() {
         let calls = vec![
-            (ToolCall::Exec { command: "ls".into() }, false),
+            (ToolCall::Exec { command: "ls".into(), shell: None }, false),
             (ToolCall::ReadFile { path: "a.rs".into() }, false),
-            (ToolCall::Exec { command: "x".into() }, true),
+            (ToolCall::Exec { command: "x".into(), shell: None }, true),
         ];
         assert_eq!(group_summary(0, &calls), "Ran 2 commands · read 1 file · 1 failed");
         assert_eq!(group_summary(1, &calls), "Thought process · ran 2 commands · read 1 file · 1 failed");

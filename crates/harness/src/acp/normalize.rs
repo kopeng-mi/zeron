@@ -97,6 +97,30 @@ pub(crate) fn xai_tool_name(update: &Value) -> Option<&str> {
     update.get("_meta")?.get("x.ai/tool")?.get("name")?.as_str()
 }
 
+/// The shell an `execute` call ran in, from the agent's own tool name
+/// (claude-acp's `_meta.claudeCode.toolName`, grok's `x.ai/tool`).
+fn exec_shell(update: &Value) -> Option<String> {
+    let name = update
+        .get("_meta")
+        .and_then(|m| m.get("claudeCode"))
+        .and_then(|c| c.get("toolName"))
+        .and_then(Value::as_str)
+        .or_else(|| xai_tool_name(update))?;
+    shell_label(name).map(str::to_owned)
+}
+
+/// Display name for a shell tool name, if it is one.
+pub(crate) fn shell_label(tool_name: &str) -> Option<&'static str> {
+    match tool_name.to_ascii_lowercase().as_str() {
+        "bash" => Some("Bash"),
+        "powershell" => Some("PowerShell"),
+        "zsh" => Some("Zsh"),
+        "sh" => Some("sh"),
+        "cmd" => Some("cmd"),
+        _ => None,
+    }
+}
+
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
 fn first_location(update: &Value) -> Option<String> {
     let path = update.get("locations")?.as_array()?.first()?.get("path")?;
@@ -184,6 +208,7 @@ fn typed_call(update: &Value) -> ToolCall {
                 .or_else(|| unwrap_command_title(&title))
                 .or_else(|| arg_from_title(&title))
                 .unwrap_or_default(),
+            shell: exec_shell(update),
         },
         "read" => ToolCall::ReadFile {
             path: raw_str("path")
@@ -552,7 +577,8 @@ mod tests {
                 AgentEvent::ToolCall {
                     id: "t1".into(),
                     call: ToolCall::Exec {
-                        command: "ls -la".into()
+                        command: "ls -la".into(),
+                        shell: None,
                     },
                 },
                 AgentEvent::ToolResult {
@@ -846,6 +872,7 @@ mod tests {
                 id: "t1".into(),
                 call: ToolCall::Exec {
                     command: "echo `hi`".into(),
+                    shell: None,
                 },
             }]
         );

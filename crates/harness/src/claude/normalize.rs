@@ -73,6 +73,7 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
         // Claude Code on Windows runs shell commands through its PowerShell tool.
         "Bash" | "PowerShell" => ToolCall::Exec {
             command: str_field(input, "command"),
+            shell: Some(name.to_owned()),
         },
         "Read" => ToolCall::ReadFile {
             path: str_field(input, "file_path"),
@@ -790,13 +791,15 @@ mod tests {
         assert_eq!(
             decode_tool_use("Bash", &json!({"command": "ls -la"})),
             ToolCall::Exec {
-                command: "ls -la".into()
+                command: "ls -la".into(),
+                shell: Some("Bash".into()),
             }
         );
         assert_eq!(
             decode_tool_use("PowerShell", &json!({"command": "Get-ChildItem"})),
             ToolCall::Exec {
-                command: "Get-ChildItem".into()
+                command: "Get-ChildItem".into(),
+                shell: Some("PowerShell".into()),
             }
         );
         assert_eq!(
@@ -957,7 +960,8 @@ mod tests {
                 event: Box::new(AgentEvent::ToolCall {
                     id: "t1".into(),
                     call: ToolCall::Exec {
-                        command: "ls".into()
+                        command: "ls".into(),
+                        shell: Some("Bash".into()),
                     },
                 }),
             }]

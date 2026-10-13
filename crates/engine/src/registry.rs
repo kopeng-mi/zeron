@@ -842,6 +842,7 @@ pub fn default_registry() -> HarnessRegistry {
                 id: "mock-tool-1".into(),
                 call: zeron_proto::ToolCall::Exec {
                     command: "cargo test --workspace".into(),
+                    shell: None,
                 },
             },
             AgentEvent::ToolResult {
@@ -855,6 +856,7 @@ pub fn default_registry() -> HarnessRegistry {
                 call: zeron_proto::ToolCall::Exec {
                     command: "git log -5 --oneline --decorate && git merge-base HEAD origin/main"
                         .into(),
+                    shell: None,
                 },
             },
             AgentEvent::ToolResult {

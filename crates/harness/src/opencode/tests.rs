@@ -1295,7 +1295,7 @@ fn tool_parts_open_and_resolve_once() {
     let events = part_snapshot_events(&mut feed, &running, true, None);
     assert!(matches!(
         events.as_slice(),
-        [AgentEvent::ToolCall { id, call: ToolCall::Exec { command } }]
+        [AgentEvent::ToolCall { id, call: ToolCall::Exec { command, .. } }]
             if id == "call-1" && command == "echo ok"
     ));
     assert!(part_snapshot_events(&mut feed, &running, true, None).is_empty());
@@ -1445,14 +1445,16 @@ fn tool_names_type_the_common_calls() {
     assert_eq!(
         call,
         ToolCall::Exec {
-            command: "ls -la".into()
+            command: "ls -la".into(),
+            shell: Some("Bash".into()),
         }
     );
     let call = oc_tool_call("shell", &json!({"command": "Get-ChildItem"}));
     assert_eq!(
         call,
         ToolCall::Exec {
-            command: "Get-ChildItem".into()
+            command: "Get-ChildItem".into(),
+            shell: None,
         }
     );
     let call = oc_tool_call(

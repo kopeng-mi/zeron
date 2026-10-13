@@ -3902,6 +3902,7 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
         // opencode names its shell tool `shell` on Windows.
         "bash" | "shell" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
+            shell: (name == "bash").then(|| "Bash".to_owned()),
         },
         "read" => ToolCall::ReadFile {
             path: s(&["filePath", "file_path", "path"]).unwrap_or_default(),

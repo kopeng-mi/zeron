@@ -170,7 +170,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
 /// small even when a tool printed a build log.
 fn tool_line(call: &ToolCall, is_error: bool, resolved: bool, output: Option<&str>) -> String {
     let mut line = match call {
-        ToolCall::Exec { command } => format!("exec: {}", clip(command, 160)),
+        ToolCall::Exec { command, .. } => format!("exec: {}", clip(command, 160)),
         ToolCall::ReadFile { path } => format!("read: {path}"),
         ToolCall::WriteFile { path, .. } => format!("write: {path}"),
         ToolCall::EditFile { path, .. } => format!("edit: {path}"),
@@ -259,6 +259,7 @@ mod tests {
                         id: "x".into(),
                         call: ToolCall::Exec {
                             command: "cargo test".into(),
+                            shell: None,
                         },
                         is_error: false,
                         resolved: true,
