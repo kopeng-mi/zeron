@@ -70,7 +70,8 @@ fn opt_str_field(input: &Value, key: &str) -> Option<String> {
 /// Decode a Claude `tool_use` block (name + input) into a typed [`ToolCall`].
 pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
     match name {
-        "Bash" => ToolCall::Exec {
+        // Claude Code on Windows runs shell commands through its PowerShell tool.
+        "Bash" | "PowerShell" => ToolCall::Exec {
             command: str_field(input, "command"),
         },
         "Read" => ToolCall::ReadFile {
@@ -790,6 +791,12 @@ mod tests {
             decode_tool_use("Bash", &json!({"command": "ls -la"})),
             ToolCall::Exec {
                 command: "ls -la".into()
+            }
+        );
+        assert_eq!(
+            decode_tool_use("PowerShell", &json!({"command": "Get-ChildItem"})),
+            ToolCall::Exec {
+                command: "Get-ChildItem".into()
             }
         );
         assert_eq!(

@@ -3899,7 +3899,8 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
             .map(str::to_owned)
     };
     match name {
-        "bash" => ToolCall::Exec {
+        // opencode names its shell tool `shell` on Windows.
+        "bash" | "shell" => ToolCall::Exec {
             command: s(&["command"]).unwrap_or_default(),
         },
         "read" => ToolCall::ReadFile {
