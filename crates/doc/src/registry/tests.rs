@@ -501,9 +501,11 @@ fn future_harness_chat_rows_stay_visible_without_their_config() {
     let chats = ws.read_chats().unwrap();
     assert_eq!(chats.len(), 2, "the future-harness row must not vanish");
     let newcomer = chats.iter().find(|c| c.id == "chat-2").expect("visible");
+    // An unknown well-formed harness id parses as an ACP agent, so the
+    // config survives too.
     assert_eq!(
-        newcomer.config, None,
-        "unknown config degrades, row survives"
+        newcomer.config.as_ref().map(|c| c.harness),
+        Some(zeron_proto::HarnessId::Acp("harness-from-the-future"))
     );
     // The well-formed sibling keeps its config untouched.
     assert!(chats.iter().any(|c| c.id == "chat-1" && c.config.is_some()));
