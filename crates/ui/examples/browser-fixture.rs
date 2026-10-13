@@ -21,6 +21,34 @@ async fn pause(cx: &mut AsyncApp, ms: u64) {
         .await;
 }
 
+#[cfg(target_os = "linux")]
+async fn wait_for_visible_window(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // Wayland captures the Weston window supplied by the runner. On X11,
+    // mapping our own window can lag behind startup on a busy CI runner.
+    if std::env::var_os("ZERON_BROWSER_CAPTURE_WINDOW").is_some() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let windows = std::process::Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &std::process::id().to_string(),
+            ])
+            .output()?;
+        if windows.status.success() && !windows.stdout.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "fixture window not visible within 10 seconds"
+        );
+        pause(cx, 50).await;
+    }
+}
+
 fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     let path = directory.join(format!("{name}.png"));
     #[cfg(target_os = "macos")]
@@ -229,6 +257,8 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "linux")]
+                wait_for_visible_window(cx).await?;
                 if let Some(url) = &storage_url {
                     storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await?;
                     std::fs::write(output.join("storage-result.json"), serde_json::to_vec(&serde_json::json!({
