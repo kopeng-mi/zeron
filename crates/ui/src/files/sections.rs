@@ -323,21 +323,6 @@ pub(crate) struct ChildChatRow {
     activity: DateTime<Utc>,
 }
 
-#[cfg(test)]
-impl ChildChatRow {
-    pub(crate) fn for_test(chat_id: &str, status: ChatIndicator) -> Self {
-        Self {
-            chat_id: chat_id.into(),
-            device_id: "d".into(),
-            title: chat_id.to_owned().into(),
-            status,
-            time_ago: "now".into(),
-            change_request: None,
-            activity: Utc::now(),
-        }
-    }
-}
-
 /// The live (unarchived) children of `chat_id`, most recent activity first —
 /// the same order the sidebar's Sessions list keeps.
 pub(crate) fn child_chat_rows(
@@ -368,7 +353,7 @@ pub(crate) fn child_chat_rows(
 
 /// A side chat titles itself on its first turn; until then the preview or a
 /// placeholder stands in.
-pub(super) fn child_chat_title(chat: &Chat) -> String {
+pub(crate) fn child_chat_title(chat: &Chat) -> String {
     chat.title
         .clone()
         .or_else(|| chat.last_message_preview.clone())

@@ -2,119 +2,65 @@
 //! it spawned (side chats and Zeron MCP `create_chat` children, which carry
 //! `parent_chat_id`) and, for the open chat only, its harness subagents.
 //!
-//! Subagents live in a chat's transcript, and only the open chat's
-//! transcript is loaded; other rows say how many are running instead of
-//! loading every transcript to list them.
-//!
-//! The tree starts collapsed and opens while anything in it runs. A click
-//! flips that default, remembered per parent. Settled subagents fold into
-//! one "N finished" line, closed until opened. The layout is planned here as
-//! data so the row heights the virtualized sidebar needs are testable.
+//! Spawned chats are full sidebar rows (harness, status, time, project,
+//! branch, PR), indented under curved tree lines. Subagents live in a chat's
+//! transcript, and only the open chat's transcript is loaded, so other rows
+//! say how many are running instead of loading every transcript to list them.
+//! The tree is always shown: nothing collapses.
 
 use super::*;
+use crate::files::{SubagentRow, child_chat_rows, subagent_rows};
+use spaces::ActiveChatRow;
 use std::collections::HashSet;
-use crate::files::{ChildChatRow, SubagentRow, child_chat_rows, subagent_rows};
 use zeron_doc::SubagentStatus;
 use zeron_proto::ChatIndicator;
 
-/// The "N subagents" line under the parent row.
-const TOGGLE_HEIGHT: f32 = 22.0;
-/// One child, fold or note line.
-const ROW_HEIGHT: f32 = 24.0;
-/// Where the tree's trunk runs, under the parent row's status glyph.
-const TRUNK_X: f32 = 16.0;
-/// The curve's reach from the trunk to a child's glyph, and its radius.
-const ELBOW_WIDTH: f32 = 9.0;
-const ELBOW_RADIUS: f32 = 6.0;
+/// A subagent or note line.
+const LINE_HEIGHT: f32 = 26.0;
+/// Where the trunk runs: under the parent row's leading glyph.
+const TRUNK_X: f32 = 14.0;
+/// The curve's reach from the trunk to a child, and its radius.
+const ELBOW_WIDTH: f32 = 10.0;
+const ELBOW_RADIUS: f32 = 7.0;
+/// A child row's left edge, past the curve.
+const CHILD_INSET: f32 = TRUNK_X + ELBOW_WIDTH + 2.0;
 
+/// What the tree lists, in order. Kept as ids and rows so it tests without a
+/// window.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum TreeItem {
-    Chat(ChildChatRow),
+pub(super) enum TreeItem<C> {
+    Chat(C),
     Subagent(SubagentRow),
-    /// The fold over settled subagents.
-    Finished { done: usize, failed: usize, open: bool },
     /// Subagents running under a chat whose transcript isn't loaded.
     Elsewhere(u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct TreePlan {
-    pub label: String,
-    pub open: bool,
-    pub items: Vec<TreeItem>,
-}
-
-impl TreePlan {
-    /// The sidebar slot the tree adds under its parent row.
-    pub fn height(&self) -> f32 {
-        TOGGLE_HEIGHT
-            + if self.open {
-                self.items.len() as f32 * ROW_HEIGHT
-            } else {
-                0.0
-            }
-    }
-}
-
-pub(super) fn finished_key(parent: &str) -> String {
-    format!("{parent}:finished")
-}
-
-/// `None` when the chat has no children to show.
-pub(super) fn plan(
-    chats: Vec<ChildChatRow>,
+/// Spawned chats first (newest activity leading), then subagents (running
+/// first), then the running count when subagents can't be listed.
+pub(super) fn plan<C>(
+    chats: Vec<C>,
     subagents: Vec<SubagentRow>,
     running_elsewhere: u32,
-    tree_flipped: bool,
-    finished_flipped: bool,
-) -> Option<TreePlan> {
-    let running = chats
-        .iter()
-        .filter(|c| c.status == ChatIndicator::Working)
-        .count()
-        + subagents
-            .iter()
-            .filter(|s| s.status == Some(SubagentStatus::Running))
-            .count()
-        + running_elsewhere as usize;
-    let total = chats.len()
-        + if subagents.is_empty() {
-            running_elsewhere as usize
-        } else {
-            subagents.len()
-        };
-    if total == 0 {
-        return None;
-    }
-    let noun = if total == 1 { "subagent" } else { "subagents" };
-    let label = if running > 0 {
-        format!("{total} {noun} · {running} running")
-    } else {
-        format!("{total} {noun}")
-    };
-    let open = (running > 0) != tree_flipped;
-
-    let mut items: Vec<TreeItem> = chats.into_iter().map(TreeItem::Chat).collect();
-    let (settled, active): (Vec<_>, Vec<_>) = subagents.into_iter().partition(|s| s.frozen());
-    items.extend(active.into_iter().map(TreeItem::Subagent));
-    if !settled.is_empty() {
-        let failed = settled
-            .iter()
-            .filter(|s| s.status == Some(SubagentStatus::Failed))
-            .count();
-        items.push(TreeItem::Finished {
-            done: settled.len() - failed,
-            failed,
-            open: finished_flipped,
-        });
-        if finished_flipped {
-            items.extend(settled.into_iter().map(TreeItem::Subagent));
-        }
-    }
-    if running_elsewhere > 0 && !items.iter().any(|i| matches!(i, TreeItem::Subagent(_))) {
+) -> Vec<TreeItem<C>> {
+    let listed = !subagents.is_empty();
+    let mut items: Vec<TreeItem<C>> = chats.into_iter().map(TreeItem::Chat).collect();
+    items.extend(subagents.into_iter().map(TreeItem::Subagent));
+    if running_elsewhere > 0 && !listed {
         items.push(TreeItem::Elsewhere(running_elsewhere));
     }
-    Some(TreePlan { label, open, items })
+    items
+}
+
+/// A planned tree with each line's height resolved.
+pub(super) struct SidebarTree {
+    lines: Vec<(TreeItem<ActiveChatRow>, f32)>,
+}
+
+impl SidebarTree {
+    /// The sidebar slot the tree adds under its parent row.
+    pub fn height(&self) -> f32 {
+        self.lines.iter().map(|(_, height)| height).sum()
+    }
 }
 
 impl Shell {
@@ -130,12 +76,12 @@ impl Shell {
             .collect()
     }
 
-    pub(super) fn sidebar_tree_plan(
+    pub(super) fn sidebar_tree(
         &self,
         parent: &str,
         parents: &HashSet<String>,
         cx: &App,
-    ) -> Option<TreePlan> {
+    ) -> Option<SidebarTree> {
         let now = Utc::now();
         let state = self.state.read(cx);
         if !parents.contains(parent)
@@ -144,237 +90,249 @@ impl Shell {
         {
             return None;
         }
+        let chats: Vec<ActiveChatRow> = child_chat_rows(state, parent, now)
+            .into_iter()
+            .filter_map(|row| {
+                let chat = state.chats.iter().find(|c| c.id == row.chat_id)?.clone();
+                Some(self.sidebar_chat_data(row.status, chat, state))
+            })
+            .collect();
         let subagents = subagent_rows(state, parent);
         let elsewhere = if subagents.is_empty() {
             state.running_subagents_for(parent, now)
         } else {
             0
         };
-        plan(
-            child_chat_rows(state, parent, now),
-            subagents,
-            elsewhere,
-            self.sidebar_tree_flipped.contains(parent),
-            self.sidebar_tree_flipped.contains(&finished_key(parent)),
-        )
+        let lines: Vec<_> = plan(chats, subagents, elsewhere)
+            .into_iter()
+            .map(|item| {
+                let height = match &item {
+                    TreeItem::Chat(row) => {
+                        sidebar_row_height(
+                            self.settings.sidebar_compact,
+                            self.settings.sidebar_show_project_label,
+                            row.branch.is_some(),
+                            row.change_request.is_some(),
+                        ) + SIDEBAR_LIST_GAP
+                    }
+                    TreeItem::Subagent(_) | TreeItem::Elsewhere(_) => LINE_HEIGHT,
+                };
+                (item, height)
+            })
+            .collect();
+        (!lines.is_empty()).then_some(SidebarTree { lines })
     }
 
-    fn flip_sidebar_tree(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.sidebar_tree_flipped.remove(&key) {
-            self.sidebar_tree_flipped.insert(key);
-        }
-        cx.notify();
-    }
-
-    /// The tree under `parent`'s row, drawn in `plan.height()`.
+    /// The tree under `parent`'s row, drawn in `tree.height()`.
     pub(super) fn render_sidebar_tree(
         &self,
         parent: &str,
-        plan: TreePlan,
+        tree: SidebarTree,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let line = theme.text_muted.opacity(0.28);
-        let count = if plan.open { plan.items.len() } else { 0 };
-        let toggle_key = parent.to_owned();
-        let toggle = branch(
-            line,
-            TOGGLE_HEIGHT,
-            count == 0,
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(10.0))
-                        .flex_none()
-                        .text_color(spaces::sidebar_header_glyph(theme))
-                        .when(plan.open, |el| {
-                            el.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                                0.25,
-                            )))
-                        }),
-                )
-                .child(muted(theme, plan.label))
-                .into_any_element(),
-        )
-        .id(SharedString::from(format!("sidebar-tree-{parent}")))
-        .debug_selector({
-            let parent = parent.to_owned();
-            move || format!("sidebar-tree-{parent}")
-        })
-        .role(gpui::Role::Button)
-        .aria_label(if plan.open {
-            "Hide subagents"
-        } else {
-            "Show subagents"
-        })
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| {
-            cx.stop_propagation();
-            this.flip_sidebar_tree(toggle_key.clone(), cx);
-        }));
-
-        let rows = plan
-            .items
+        let line = theme.text_muted.opacity(0.3);
+        let count = tree.lines.len();
+        let selected = self.state.read(cx).selected_chat.clone();
+        let parent_harness = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == parent)
+            .and_then(|chat| chat.config.as_ref().map(|c| c.harness));
+        let lines = tree
+            .lines
             .into_iter()
-            .take(count)
             .enumerate()
-            .map(|(index, item)| {
+            .map(|(index, (item, height))| {
                 let last = index + 1 == count;
-                self.render_tree_item(parent, index, item, last, line, theme, cx)
+                match item {
+                    TreeItem::Chat(row) => {
+                        // The elbow meets the title line, the row's last.
+                        let reach = height - 6.0 - 8.5;
+                        let is_selected = selected.as_deref() == Some(row.chat.id.as_str())
+                            || self.side_chat_open_here(&row.chat.id, cx);
+                        let element = self.render_tree_chat(row, is_selected, theme, cx);
+                        branch(line, height, reach, last, element)
+                    }
+                    TreeItem::Subagent(agent) => {
+                        let element = self.render_tree_subagent(
+                            parent,
+                            index,
+                            agent,
+                            parent_harness,
+                            theme,
+                            cx,
+                        );
+                        branch(line, height, height / 2.0, last, element)
+                    }
+                    TreeItem::Elsewhere(running) => branch(
+                        line,
+                        height,
+                        height / 2.0,
+                        last,
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(Theme::SPACE_SM))
+                            .child(dot(spaces::status_dot_color(
+                                ChatIndicator::Working,
+                                theme,
+                            )))
+                            .child(muted(
+                                theme,
+                                format!("{running} subagents running · open the chat to list them"),
+                            ))
+                            .into_any_element(),
+                    ),
+                }
             });
         div()
             .w_full()
             .flex()
             .flex_col()
-            .child(toggle)
-            .children(rows)
+            .children(lines)
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_tree_item(
+    /// A spawned chat, as the same row its parent wears.
+    fn render_tree_chat(
         &self,
-        parent: &str,
-        index: usize,
-        item: TreeItem,
-        last: bool,
-        line: gpui::Hsla,
+        row: ActiveChatRow,
+        selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = SharedString::from(format!("sidebar-tree-{parent}-{index}"));
-        match item {
-            TreeItem::Chat(chat) => {
-                let selected = self.side_chat_open_here(&chat.chat_id, cx);
-                let parent_id = parent.to_owned();
-                let chat_id = chat.chat_id.clone();
-                branch(
-                    line,
-                    ROW_HEIGHT,
-                    last,
-                    row_content(
-                        dot(spaces::status_dot_color(chat.status, theme)),
-                        title(theme, chat.title, selected),
-                        Some(muted(theme, chat.time_ago.to_string())),
-                    ),
-                )
-                .id(id)
-                .cursor_pointer()
-                .rounded(px(5.0))
-                .when(selected, |el| el.bg(theme.glass_hover()))
-                .hover(|el| el.bg(theme.glass_hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    let state = this.state.read(cx);
-                    if state.selected_chat.as_deref() != Some(parent_id.as_str()) {
-                        this.open_chat(parent_id.clone(), cx);
-                    }
-                    this.open_child_chat_tab(&chat_id, cx);
-                }))
-                .into_any_element()
-            }
-            TreeItem::Subagent(agent) => {
-                let color = match agent.status {
-                    Some(SubagentStatus::Running) => {
-                        spaces::status_dot_color(ChatIndicator::Working, theme)
-                    }
-                    Some(SubagentStatus::Done) => {
-                        spaces::status_dot_color(ChatIndicator::Completed, theme)
-                    }
-                    Some(SubagentStatus::Failed) => {
-                        spaces::status_dot_color(ChatIndicator::Errored, theme)
-                    }
-                    None => spaces::status_dot_color(ChatIndicator::Idle, theme),
-                };
-                let parent_id = parent.to_owned();
-                let frozen = agent.frozen();
-                let doc_id = agent.doc_id.clone();
-                let tab_title = agent.title.to_string();
-                branch(
-                    line,
-                    ROW_HEIGHT,
-                    last,
-                    row_content(
-                        dot(color),
-                        title(theme, agent.title, false),
-                        Some(tag(theme, "subagent")),
-                    ),
-                )
-                .id(id)
-                .cursor_pointer()
-                .rounded(px(5.0))
-                .hover(|el| el.bg(theme.glass_hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.add_subagent_surface(
-                        parent_id.clone(),
-                        doc_id.clone(),
-                        tab_title.clone(),
-                        frozen,
-                        cx,
-                    );
-                }))
-                .into_any_element()
-            }
-            TreeItem::Finished { done, failed, open } => {
-                let key = finished_key(parent);
-                let label = if failed > 0 {
-                    format!("{} finished · {failed} failed", done + failed)
-                } else {
-                    format!("{done} finished")
-                };
-                branch(
-                    line,
-                    ROW_HEIGHT,
-                    last,
-                    row_content(
-                        icon(icons::ALT_ARROW_RIGHT)
-                            .size(px(10.0))
+        let ActiveChatRow {
+            status,
+            chat,
+            folder,
+            branch,
+            change_request,
+            ..
+        } = row;
+        let time_ago: SharedString =
+            format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now()).into();
+        let harness = self
+            .settings
+            .sidebar_show_harness
+            .then(|| chat.config.as_ref().map(|c| c.harness))
+            .flatten();
+        let title = transcript::single_line(&crate::files::child_chat_title(&chat));
+        div()
+            .pt(px(SIDEBAR_LIST_GAP))
+            .child(self.render_chat_row(
+                chat.id.clone(),
+                title.into(),
+                time_ago,
+                folder.into(),
+                branch.map(SharedString::from),
+                change_request,
+                harness,
+                status,
+                selected,
+                false,
+                false,
+                None,
+                None,
+                false,
+                None,
+                theme,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_tree_subagent(
+        &self,
+        parent: &str,
+        index: usize,
+        agent: SubagentRow,
+        harness: Option<zeron_proto::HarnessId>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (color, label) = match agent.status {
+            Some(SubagentStatus::Running) => (
+                spaces::status_dot_color(ChatIndicator::Working, theme),
+                "Working",
+            ),
+            Some(SubagentStatus::Done) => (
+                spaces::status_dot_color(ChatIndicator::Completed, theme),
+                "Done",
+            ),
+            Some(SubagentStatus::Failed) => (
+                spaces::status_dot_color(ChatIndicator::Errored, theme),
+                "Failed",
+            ),
+            None => (spaces::status_dot_color(ChatIndicator::Idle, theme), ""),
+        };
+        let parent_id = parent.to_owned();
+        let frozen = agent.frozen();
+        let doc_id = agent.doc_id.clone();
+        let tab_title = agent.title.to_string();
+        let time_ago = format_time_ago(agent.spawned_at, Utc::now());
+        div()
+            .id(SharedString::from(format!("sidebar-tree-{parent}-{index}")))
+            .h_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(Theme::SPACE_SM))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.glass_hover()))
+            .child(dot(color))
+            .when_some(
+                harness.map(crate::pickers::harness_brand_icon),
+                |el, (path, tint)| {
+                    el.child(
+                        icon(path)
+                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                             .flex_none()
-                            .text_color(spaces::sidebar_header_glyph(theme))
-                            .when(open, |el| {
-                                el.with_transformation(gpui::Transformation::rotate(
-                                    gpui::percentage(0.25),
-                                ))
-                            })
-                            .into_any_element(),
-                        muted(theme, label),
-                        None,
-                    ),
-                )
-                .id(id)
-                .cursor_pointer()
-                .rounded(px(5.0))
-                .hover(|el| el.bg(theme.glass_hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.flip_sidebar_tree(key.clone(), cx);
-                }))
-                .into_any_element()
-            }
-            TreeItem::Elsewhere(running) => branch(
-                line,
-                ROW_HEIGHT,
-                last,
-                row_content(
-                    dot(spaces::status_dot_color(ChatIndicator::Working, theme)),
-                    muted(theme, format!("{running} running · open the chat to see them")),
-                    None,
-                ),
+                            .text_color(tint.unwrap_or(theme.text_muted).opacity(0.8)),
+                    )
+                },
             )
-            .id(id)
-            .into_any_element(),
-        }
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text.opacity(0.8))
+                    .child(agent.title),
+            )
+            .child(tag(theme, "subagent"))
+            .child(muted(
+                theme,
+                if label.is_empty() || label == "Done" {
+                    time_ago
+                } else {
+                    label.to_owned()
+                },
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.add_subagent_surface(
+                    parent_id.clone(),
+                    doc_id.clone(),
+                    tab_title.clone(),
+                    frozen,
+                    cx,
+                );
+            }))
+            .into_any_element()
     }
 }
 
-/// One line of the tree: a curved elbow off the trunk, and the trunk running
-/// on below unless this is the last line.
-fn branch(line: gpui::Hsla, height: f32, last: bool, content: AnyElement) -> gpui::Div {
+/// One line of the tree: a curved elbow off the trunk reaching down to
+/// `reach`, the trunk running on below unless this is the last line.
+fn branch(line: gpui::Hsla, height: f32, reach: f32, last: bool, content: AnyElement) -> AnyElement {
     div()
         .relative()
         .w_full()
@@ -386,7 +344,7 @@ fn branch(line: gpui::Hsla, height: f32, last: bool, content: AnyElement) -> gpu
                 .left(px(TRUNK_X))
                 .top_0()
                 .w(px(ELBOW_WIDTH))
-                .h(px(height / 2.0))
+                .h(px(reach))
                 .border_l_1()
                 .border_b_1()
                 .rounded_bl(px(ELBOW_RADIUS))
@@ -397,7 +355,7 @@ fn branch(line: gpui::Hsla, height: f32, last: bool, content: AnyElement) -> gpu
                 div()
                     .absolute()
                     .left(px(TRUNK_X))
-                    .top(px(height / 2.0))
+                    .top(px(reach))
                     .bottom_0()
                     .border_l_1()
                     .border_color(line),
@@ -406,27 +364,12 @@ fn branch(line: gpui::Hsla, height: f32, last: bool, content: AnyElement) -> gpu
         .child(
             div()
                 .absolute()
-                .left(px(TRUNK_X + ELBOW_WIDTH + 4.0))
-                .right(px(6.0))
+                .left(px(CHILD_INSET))
+                .right_0()
                 .top_0()
                 .bottom_0()
-                .flex()
-                .items_center()
                 .child(content),
         )
-}
-
-fn row_content(lead: AnyElement, title: AnyElement, trail: Option<AnyElement>) -> AnyElement {
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .child(lead)
-        .child(div().flex_1().min_w_0().child(title))
-        .children(trail.map(|el| div().flex_none().child(el)))
         .into_any_element()
 }
 
@@ -439,28 +382,21 @@ fn dot(color: gpui::Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn title(theme: &Theme, text: SharedString, selected: bool) -> AnyElement {
-    div()
-        .truncate()
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(if selected { theme.text } else { theme.text_muted })
-        .child(text)
-        .into_any_element()
-}
-
 fn muted(theme: &Theme, text: String) -> AnyElement {
     div()
-        .truncate()
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_muted.opacity(0.75))
+        .flex_none()
+        .text_size(crate::typography::ui_rems(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted.opacity(0.5))
         .child(SharedString::from(text))
         .into_any_element()
 }
 
 fn tag(theme: &Theme, text: &'static str) -> AnyElement {
     div()
+        .flex_none()
         .px(px(5.0))
-        .h(px(16.0))
+        .h(px(15.0))
         .flex()
         .items_center()
         .rounded(px(4.0))
@@ -476,10 +412,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn chat(id: &str, status: ChatIndicator) -> ChildChatRow {
-        ChildChatRow::for_test(id, status)
-    }
-
     fn agent(id: &str, status: Option<SubagentStatus>) -> SubagentRow {
         SubagentRow {
             doc_id: id.into(),
@@ -490,51 +422,31 @@ mod tests {
     }
 
     #[test]
-    fn no_children_means_no_tree() {
-        assert_eq!(plan(vec![], vec![], 0, false, false), None);
+    fn no_children_means_no_lines() {
+        assert!(plan::<&str>(vec![], vec![], 0).is_empty());
     }
 
     #[test]
-    fn collapsed_when_idle_and_open_while_running() {
-        let idle = plan(vec![chat("a", ChatIndicator::Idle)], vec![], 0, false, false).unwrap();
-        assert!(!idle.open);
-        assert_eq!(idle.label, "1 subagent");
-        assert_eq!(idle.height(), TOGGLE_HEIGHT);
-
-        let busy = plan(vec![chat("a", ChatIndicator::Working)], vec![], 0, false, false).unwrap();
-        assert!(busy.open);
-        assert_eq!(busy.label, "1 subagent · 1 running");
-        assert_eq!(busy.height(), TOGGLE_HEIGHT + ROW_HEIGHT);
-
-        // A click flips either default.
-        assert!(plan(vec![chat("a", ChatIndicator::Idle)], vec![], 0, true, false).unwrap().open);
-        assert!(!plan(vec![chat("a", ChatIndicator::Working)], vec![], 0, true, false).unwrap().open);
-    }
-
-    #[test]
-    fn settled_subagents_fold_until_opened() {
-        let agents = vec![
-            agent("run", Some(SubagentStatus::Running)),
-            agent("ok", Some(SubagentStatus::Done)),
-            agent("bad", Some(SubagentStatus::Failed)),
-        ];
-        let closed = plan(vec![], agents.clone(), 0, false, false).unwrap();
-        assert_eq!(closed.label, "3 subagents · 1 running");
-        assert_eq!(closed.items.len(), 2);
-        assert_eq!(
-            closed.items[1],
-            TreeItem::Finished { done: 1, failed: 1, open: false }
+    fn chats_lead_then_every_subagent_is_listed() {
+        let items = plan(
+            vec!["a", "b"],
+            vec![
+                agent("run", Some(SubagentStatus::Running)),
+                agent("ok", Some(SubagentStatus::Done)),
+            ],
+            0,
         );
-        let opened = plan(vec![], agents, 0, false, true).unwrap();
-        assert_eq!(opened.items.len(), 4);
-        assert_eq!(opened.height(), TOGGLE_HEIGHT + 4.0 * ROW_HEIGHT);
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], TreeItem::Chat("a"));
+        assert!(matches!(&items[3], TreeItem::Subagent(s) if s.doc_id == "ok"));
     }
 
     #[test]
-    fn unloaded_chats_count_running_subagents_without_listing_them() {
-        let tree = plan(vec![chat("a", ChatIndicator::Idle)], vec![], 2, false, false).unwrap();
-        assert_eq!(tree.label, "3 subagents · 2 running");
-        assert!(tree.open);
-        assert_eq!(tree.items.last(), Some(&TreeItem::Elsewhere(2)));
+    fn unloaded_chats_note_running_subagents_without_listing_them() {
+        let items = plan(vec!["a"], vec![], 2);
+        assert_eq!(items.last(), Some(&TreeItem::Elsewhere(2)));
+        // A loaded list replaces the note.
+        let items = plan::<&str>(vec![], vec![agent("x", None)], 2);
+        assert!(!items.iter().any(|i| matches!(i, TreeItem::Elsewhere(_))));
     }
 }

@@ -33,7 +33,7 @@ pub mod preview;
 mod rename;
 pub mod search;
 mod sections;
-pub(crate) use sections::{ChildChatRow, SubagentRow, child_chat_rows, subagent_rows};
+pub(crate) use sections::{SubagentRow, child_chat_rows, child_chat_title, subagent_rows};
 mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;

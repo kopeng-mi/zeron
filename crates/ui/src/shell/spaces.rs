@@ -2033,12 +2033,12 @@ pub(super) fn pinned_drag_snapshot_is_valid(
     snapshot_ids.iter().any(|id| id == dragged_id) && snapshot_ids == current_ids
 }
 
-struct ActiveChatRow {
-    status: ChatIndicator,
-    chat: zeron_proto::Chat,
-    folder: String,
-    branch: Option<String>,
-    change_request: Option<zeron_proto::ChangeRequestSummary>,
+pub(super) struct ActiveChatRow {
+    pub(super) status: ChatIndicator,
+    pub(super) chat: zeron_proto::Chat,
+    pub(super) folder: String,
+    pub(super) branch: Option<String>,
+    pub(super) change_request: Option<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
 }
 
@@ -4974,7 +4974,7 @@ impl Shell {
     }
 
     /// Shared metadata and visibility settings for active and archived sessions.
-    fn sidebar_chat_data(
+    pub(super) fn sidebar_chat_data(
         &self,
         status: ChatIndicator,
         chat: zeron_proto::Chat,
@@ -5089,7 +5089,7 @@ impl Shell {
                     row.branch.is_some(),
                     row.change_request.is_some(),
                 ) + self
-                    .sidebar_tree_plan(&row.chat.id, &tree_parents, cx)
+                    .sidebar_tree(&row.chat.id, &tree_parents, cx)
                     .map_or(0.0, |tree| tree.height())
             })
             .collect();
@@ -5349,7 +5349,7 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let tree = self.sidebar_tree_plan(&chat.id, &tree_parents, cx);
+                let tree = self.sidebar_tree(&chat.id, &tree_parents, cx);
                 let tree_height = tree.as_ref().map_or(0.0, |tree| tree.height());
                 let tree = tree.map(|tree| self.render_sidebar_tree(&chat.id, tree, theme, cx));
                 let element = self.render_chat_row(
