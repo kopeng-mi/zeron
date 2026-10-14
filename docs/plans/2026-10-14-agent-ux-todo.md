@@ -22,10 +22,10 @@ the turn footer, e.g. `42 MB · cache 91% hit · warm 3m left`):
 
 - [ ] **Memory** of the spawned agent's process tree (resident set), sampled
   while the turn runs.
-- [ ] **Cache hit / miss** per turn from usage: `cache_read_input_tokens`
+- [x] **Cache hit / miss** per turn from usage: `cache_read_input_tokens`
   vs `cache_creation_input_tokens` + `input_tokens` (Claude; other harnesses
   where they report it).
-- [ ] **Cache warm countdown** for Claude. Read the TTL from the usage
+- [x] **Cache warm countdown** for Claude. Read the TTL from the usage
   (`cache_creation.ephemeral_1h_input_tokens` vs `ephemeral_5m_input_tokens`):
   subscriptions within included usage get 1 hour, otherwise 5 minutes
   ([docs](https://code.claude.com/docs/en/prompt-caching)). Count down from
