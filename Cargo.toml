@@ -171,6 +171,9 @@ strip = "symbols"
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
+# File:line backtraces without full debug info: zeron-ui's test crate runs
+# rustc out of memory on 14 GB machines otherwise, and builds go faster.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
