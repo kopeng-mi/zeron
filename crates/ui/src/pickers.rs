@@ -8597,6 +8597,7 @@ mod tests {
             can_install: false,
             enabled: Some(true),
             acp: None,
+            executable: None,
             reasoning_levels: Vec::new(),
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             supports_steering: false,
@@ -9935,6 +9936,7 @@ mod tests {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
@@ -9963,6 +9965,7 @@ mod tests {
             can_install: false,
             enabled,
             acp: None,
+            executable: None,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
             vec![
@@ -10017,6 +10020,7 @@ mod tests {
                 can_install: false,
                 enabled,
                 acp: None,
+                executable: None,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
         // enabled one rides along. A live engine no longer stamps that

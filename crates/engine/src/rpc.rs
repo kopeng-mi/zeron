@@ -1545,6 +1545,7 @@ fn forwardable(method: &str) -> bool {
             | methods::ADD_ACP_AGENT
             | methods::REMOVE_ACP_AGENT
             | methods::SET_ACP_AGENT_ENV
+            | methods::SET_PI_COMMAND
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
@@ -2009,6 +2010,20 @@ impl RpcService for EngineRpc {
                 self.registry
                     .update_acp_agent_env(p.harness, p.env)
                     .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.descriptors())
+            }
+            methods::SET_PI_COMMAND => {
+                #[derive(Deserialize)]
+                struct Params {
+                    command: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.registry
+                    .set_pi_command(p.command)
+                    .map_err(RpcError::Failed)?;
+                if let Some(coordinator) = &self.harness_updates {
+                    coordinator.refresh_enabled();
+                }
                 RpcReply::value(&self.registry.descriptors())
             }
             methods::LIST_MODELS => {

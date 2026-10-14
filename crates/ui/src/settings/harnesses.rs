@@ -217,6 +217,8 @@ pub struct HarnessesPage {
 
 struct EnvDialog {
     harness: HarnessId,
+    /// Edits the program Pi runs rather than an ACP agent's environment.
+    pi_command: bool,
     input: Entity<crate::composer::ComposerInput>,
     error: Option<String>,
     focus_pending: bool,
@@ -303,6 +305,7 @@ impl HarnessesPage {
             .flex_col()
             .gap(px(20.0))
             .children(self.render_acp_agent_for(descriptor, theme, cx))
+            .children(self.render_pi_command_for(descriptor, theme, cx))
             .child(self.render_completion_for(harness, theme, cx))
             .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
@@ -407,10 +410,65 @@ impl HarnessesPage {
         )
     }
 
+    /// Pi's program row: `pi`, or another Pi build such as `pi-bolt`.
+    fn render_pi_command_for(
+        &self,
+        descriptor: &HarnessDescriptor,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if descriptor.id != HarnessId::Pi {
+            return None;
+        }
+        let command = descriptor.executable.clone().unwrap_or_else(|| "pi".into());
+        let row = div()
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Program"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div().truncate().child(command).into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::ghost_action(theme)
+                    .id("pi-command-edit")
+                    .flex_none()
+                    .on_click(cx.listener(|page, _, _, cx| {
+                        page.open_dialog(HarnessId::Pi, true, cx)
+                    }))
+                    .child("Edit"),
+            );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(widgets::details_label(theme, "Agent"))
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
     fn open_env_dialog(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| {
-            crate::composer::ComposerInput::new("API_KEY=… OTHER=…", cx).with_single_line()
-        });
+        self.open_dialog(harness, false, cx);
+    }
+
+    fn open_dialog(&mut self, harness: HarnessId, pi_command: bool, cx: &mut Context<Self>) {
+        let placeholder = if pi_command {
+            "pi-bolt, or a full path. Empty runs pi"
+        } else {
+            "API_KEY=… OTHER=…"
+        };
+        let input =
+            cx.new(|cx| crate::composer::ComposerInput::new(placeholder, cx).with_single_line());
         let events = cx.subscribe(&input, |page: &mut Self, _, event, cx| {
             if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
                 page.submit_env(cx);
@@ -418,6 +476,7 @@ impl HarnessesPage {
         });
         self.env_dialog = Some(EnvDialog {
             harness,
+            pi_command,
             input,
             error: None,
             focus_pending: true,
@@ -431,25 +490,36 @@ impl HarnessesPage {
             return;
         };
         let line = dialog.input.read(cx).text().to_string();
-        let changes = match zeron_harness::acp_agents::parse_env_assignments(&line) {
-            Ok(changes) => changes,
-            Err(error) => {
-                dialog.error = Some(error);
-                cx.notify();
-                return;
-            }
+        let (method, params) = if dialog.pi_command {
+            let command = line.trim();
+            (
+                methods::SET_PI_COMMAND,
+                serde_json::json!({ "command": (!command.is_empty()).then_some(command) }),
+            )
+        } else {
+            let changes = match zeron_harness::acp_agents::parse_env_assignments(&line) {
+                Ok(changes) => changes,
+                Err(error) => {
+                    dialog.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            };
+            (
+                methods::SET_ACP_AGENT_ENV,
+                serde_json::json!({ "harness": dialog.harness, "env": changes }),
+            )
         };
-        let harness = dialog.harness;
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = self.with_target(serde_json::json!({ "harness": harness, "env": changes }));
+        let params = self.with_target(params);
         let target = self.target_device.clone();
         self.env_dialog = None;
         self.env_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call(methods::SET_ACP_AGENT_ENV, params)
+                .call(method, params)
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|value| {
@@ -464,12 +534,10 @@ impl HarnessesPage {
                 match result {
                     Ok(list) => {
                         page.set_catalog(list, cx);
-                        // New credentials can unlock model discovery.
+                        // New credentials or a new program change the models.
                         crate::pickers::bump_harness_catalog(cx);
                     }
-                    Err(error) => {
-                        page.error = Some(format!("Couldn't save the environment — {error}"))
-                    }
+                    Err(error) => page.error = Some(format!("Couldn't save — {error}")),
                 }
                 cx.notify();
             })
@@ -494,6 +562,7 @@ impl HarnessesPage {
         let input = dialog.input.clone();
         let error = dialog.error.clone();
         let harness = dialog.harness;
+        let pi_command = dialog.pi_command;
         let name = self
             .harnesses
             .ready()
@@ -511,10 +580,21 @@ impl HarnessesPage {
                     cx.stop_propagation();
                 }
             }))
-            .child(popover::dialog_title(&theme, &format!("{name} environment")))
+            .child(popover::dialog_title(
+                &theme,
+                &if pi_command {
+                    format!("{name} program")
+                } else {
+                    format!("{name} environment")
+                },
+            ))
             .child(div().mt(px(6.0)).child(popover::dialog_body(
                 &theme,
-                "KEY=value sets a variable and KEY= removes it; others stay as they are. Values stay on this device.",
+                if pi_command {
+                    "Run another Pi build, like pi-bolt: a name on PATH or a full path. Leave it empty to run pi."
+                } else {
+                    "KEY=value sets a variable and KEY= removes it; others stay as they are. Values stay on this device."
+                },
             )))
             .child(
                 div()
@@ -1767,6 +1847,7 @@ mod tests {
             can_install: false,
             enabled: Some(true),
             acp: None,
+            executable: None,
         };
         window
             .update(cx, |page, _, cx| {

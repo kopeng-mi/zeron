@@ -63,6 +63,10 @@ pub mod methods {
     /// `{harness, env: {KEY: value}}` (empty value removes); replies with
     /// the catalog.
     pub const SET_ACP_AGENT_ENV: &str = "SetAcpAgentEnv";
+    /// Set the program the built-in Pi slot runs, `{command}` (a name on
+    /// PATH or a full path; null or empty means `pi`); replies with the
+    /// catalog.
+    pub const SET_PI_COMMAND: &str = "SetPiCommand";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

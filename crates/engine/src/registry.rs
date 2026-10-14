@@ -42,6 +42,10 @@ pub struct HarnessDescriptor {
     /// Set on user-added ACP agents, which Settings → Providers can remove.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpAgentInfo>,
+    /// The program a built-in slot runs instead of its default CLI (Pi only:
+    /// `pi-bolt`, a full path). `None` runs the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
 }
 
 /// What Settings → Providers shows about a user-added ACP agent.
@@ -199,6 +203,17 @@ pub fn descriptor_enabled(descriptor: &HarnessDescriptor) -> bool {
         .unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
 }
 
+fn pi_harness(command: &Mutex<Option<String>>) -> Result<zeron_harness::PiHarness, HarnessError> {
+    let command = command
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match command {
+        Some(command) => zeron_harness::PiHarness::new().with_command(&command),
+        None => Ok(zeron_harness::PiHarness::new()),
+    }
+}
+
 fn describe(harness: &dyn Harness) -> HarnessDescriptor {
     HarnessDescriptor {
         id: harness.id(),
@@ -210,6 +225,7 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         can_install: false,
         enabled: None,
         acp: None,
+        executable: None,
     }
 }
 
@@ -222,6 +238,10 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    /// The program the built-in Pi slot runs (`pi-bolt`, a full path);
+    /// `None` runs `pi`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pi_command: Option<String>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -271,6 +291,8 @@ pub struct HarnessRegistry {
     /// order they were added; persisted in `{data_dir}/acp-agents.json`.
     acp_agents: Mutex<Vec<AcpAgentConfig>>,
     acp_agents_path: Mutex<Option<PathBuf>>,
+    /// Mirror of `prefs.pi_command` the Pi slot's closures read.
+    pi_command: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for HarnessRegistry {
@@ -355,6 +377,7 @@ impl HarnessRegistry {
             update_generation,
             acp_agents: Mutex::new(Vec::new()),
             acp_agents_path: Mutex::new(None),
+            pi_command: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -459,12 +482,76 @@ impl HarnessRegistry {
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        let pi_command = loaded.pi_command.clone();
         *self.prefs() = loaded;
         *self
             .prefs_path
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
         self.migrate_legacy_prefs();
+        if pi_command.is_some() {
+            *self.pi_command_guard() = pi_command;
+            self.register_pi();
+        }
+    }
+
+    #[cfg(test)]
+    fn pi_command_for_test(&self) -> Option<String> {
+        self.prefs().pi_command.clone()
+    }
+
+    fn pi_command_guard(&self) -> MutexGuard<'_, Option<String>> {
+        self.pi_command
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The program the Pi slot runs; `None` is plain `pi`.
+    pub fn pi_command(&self) -> Option<String> {
+        self.pi_command_guard().clone()
+    }
+
+    /// Native Pi RPC, running `pi` or the program set in Settings. Thinking
+    /// levels are discovered per model. Re-registering replaces a resolved
+    /// harness, so the next use starts the new program with a fresh catalog.
+    fn register_pi(&self) {
+        let probe = self.pi_command.clone();
+        let build = self.pi_command.clone();
+        self.register_lazy(
+            HarnessDescriptor {
+                id: HarnessId::Pi,
+                name: "Pi".into(),
+                supports_steering: true,
+                steering_mode: SteeringMode::StepBoundary,
+                reasoning_levels: Vec::new(),
+                installed: true,
+                can_install: false,
+                enabled: None,
+                acp: None,
+                executable: None,
+            },
+            Box::new(move || pi_harness(&probe).is_ok_and(|pi| pi.installed())),
+            Box::new(move || Ok(Arc::new(pi_harness(&build)?) as Arc<dyn Harness>)),
+        );
+    }
+
+    /// Point the Pi slot at another program, or back at `pi` with `None`.
+    /// Refuses a command that can't be found, so a typo never leaves Pi
+    /// unable to start.
+    pub fn set_pi_command(&self, command: Option<String>) -> Result<(), String> {
+        let command = command
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty() && c != "pi");
+        if let Some(command) = &command {
+            zeron_harness::PiHarness::new()
+                .with_command(command)
+                .map_err(|error| error.to_string())?;
+        }
+        self.prefs().pi_command = command.clone();
+        *self.pi_command_guard() = command;
+        self.register_pi();
+        self.persist_prefs();
+        Ok(())
     }
 
     /// Fold a legacy allow-list into the opt-out shape: a registered harness
@@ -633,6 +720,7 @@ impl HarnessRegistry {
     pub fn descriptors(&self) -> Vec<HarnessDescriptor> {
         let enabled = self.enabled_set();
         let acp_agents = self.acp_agents();
+        let pi_command = self.pi_command();
         let slots = self.slots();
         self.order()
             .iter()
@@ -655,6 +743,9 @@ impl HarnessRegistry {
                     .iter()
                     .find(|agent| agent.id == *id)
                     .map(AcpAgentInfo::from);
+                if *id == HarnessId::Pi {
+                    descriptor.executable = pi_command.clone();
+                }
                 Some(descriptor)
             })
             .collect()
@@ -710,6 +801,7 @@ impl HarnessRegistry {
                 can_install: false,
                 enabled: None,
                 acp: None,
+                executable: None,
             },
             Box::new(move || probe.installed()),
             Box::new(move || {
@@ -895,6 +987,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
@@ -924,6 +1017,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -942,6 +1036,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
@@ -961,6 +1056,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
@@ -984,6 +1080,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
@@ -1003,26 +1100,12 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
-    // Native Pi RPC. Thinking levels are discovered per model.
-    registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Pi,
-            name: "Pi".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            acp: None,
-        },
-        Box::new(|| zeron_harness::PiHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
-    );
+    registry.register_pi();
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -1045,6 +1128,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
@@ -1064,6 +1148,7 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
             acp: None,
+            executable: None,
         },
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
@@ -1074,6 +1159,36 @@ pub fn default_registry() -> HarnessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_command_is_validated_shown_and_cleared() {
+        let registry = default_registry();
+        let pi = |registry: &HarnessRegistry| {
+            registry
+                .descriptors()
+                .into_iter()
+                .find(|d| d.id == HarnessId::Pi)
+                .unwrap()
+                .executable
+        };
+        assert!(
+            registry
+                .set_pi_command(Some("zeron-no-such-pi-build".into()))
+                .is_err()
+        );
+        assert_eq!(pi(&registry), None);
+
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        registry.set_pi_command(Some(exe.clone())).unwrap();
+        assert_eq!(pi(&registry), Some(exe.clone()));
+        assert_eq!(registry.pi_command_for_test(), Some(exe));
+
+        // Empty and plain `pi` both mean the default.
+        registry.set_pi_command(Some("  ".into())).unwrap();
+        assert_eq!(pi(&registry), None);
+        registry.set_pi_command(Some("pi".into())).unwrap();
+        assert_eq!(registry.pi_command_for_test(), None);
+    }
 
     #[test]
     fn mid_turn_steering_requires_support_and_a_step_boundary() {
@@ -1087,6 +1202,7 @@ mod tests {
             can_install: false,
             enabled: Some(true),
             acp: None,
+            executable: None,
         };
         assert!(descriptor.steers_mid_turn());
 
@@ -1115,6 +1231,7 @@ mod tests {
                 can_install: false,
                 enabled: None,
                 acp: None,
+                executable: None,
             },
             Box::new(|| false),
             Box::new(move || {
@@ -1263,6 +1380,7 @@ mod tests {
                 can_install: false,
                 enabled: None,
                 acp: None,
+                executable: None,
             },
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -1490,6 +1608,7 @@ mod tests {
                 can_install: false,
                 enabled: None,
                 acp: None,
+                executable: None,
             },
             Box::new(move || probe.load(Ordering::SeqCst)),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),

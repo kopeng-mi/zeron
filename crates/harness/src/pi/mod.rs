@@ -55,6 +55,19 @@ impl PiHarness {
         self.executable = Some(path.into());
         self
     }
+    /// Run a Pi build other than `pi` (`pi-bolt`, a full path). A bare name
+    /// is looked up on PATH like `pi` is; a path must name a launchable file.
+    pub fn with_command(self, command: &str) -> Result<Self, HarnessError> {
+        let command = command.trim();
+        let path = Path::new(command);
+        let exe = if path.is_absolute() || path.components().count() > 1 {
+            crate::executable::validate_native_override(path)?
+        } else {
+            crate::executable::find_on_paths(command, vec![])
+                .ok_or_else(|| HarnessError::NotInstalled(format!("{command} is not on PATH")))?
+        };
+        Ok(self.with_executable(exe))
+    }
     pub fn with_session_store(mut self, path: impl Into<PathBuf>) -> Self {
         self.session_store = Some(path.into());
         self
