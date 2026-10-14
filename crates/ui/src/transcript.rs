@@ -1355,7 +1355,11 @@ pub fn rows_for_entry(
     let streaming = entry.status == Some(MessageStatus::Streaming);
     let entry_id: SharedString = entry.id.clone().into();
 
-    if entry.role == MessageRole::User {
+    // The engine records events it delivered silently (agent messages,
+    // turn notices) as system entries; they draw as agent cards.
+    let recorded_event = entry.role == MessageRole::System
+        && (entry.id.starts_with("event:") || entry.id.starts_with("steer:"));
+    if entry.role == MessageRole::User || recorded_event {
         let raw: String = entry
             .parts
             .iter()
@@ -1374,7 +1378,17 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let agent = zeron_proto::agent_messages::cards(&body).map(Arc::new);
+        let agent = zeron_proto::agent_messages::cards(&body).map(|mut cards| {
+            if entry.id.starts_with("steer:") {
+                for card in &mut cards {
+                    card.steered = true;
+                }
+            }
+            Arc::new(cards)
+        });
+        if recorded_event && agent.is_none() {
+            return Vec::new();
+        }
         let body = agent_message_display(&body);
         // Chips stand in for their attachments: those leave the strip, and a
         // chip carries its upload's path for its progress and, for an image,
@@ -6497,6 +6511,15 @@ impl Transcript {
                             .child(direction),
                     )
                     .child(div().flex_1())
+                    .when(card.steered, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child("steered in"),
+                        )
+                    })
                     .when(card.waiting, |el| {
                         el.child(
                             div()
@@ -12376,6 +12399,28 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn recorded_events_draw_as_cards_and_mark_steers() {
+        let message = "[Message from Zeron chat Worker (0f3a9c21), id 0f3a9c21-aaaa. From your subagent. Reply with send_message only if it needs an answer.]\n\nfound it";
+        let mut entry = assistant(
+            "steer:1",
+            MessageStatus::Complete,
+            vec![text_part("t", message)],
+        );
+        entry.role = MessageRole::System;
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User { agent: Some(cards), .. } = &rows[0].kind else {
+            panic!("a recorded event is a card");
+        };
+        assert!(cards[0].steered);
+        assert_eq!(cards[0].body, "found it");
+
+        // A system entry that isn't agent traffic draws nothing here.
+        entry.id = "event:2".into();
+        entry.parts = vec![text_part("t", "plain")];
+        assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
     }
 
     #[test]

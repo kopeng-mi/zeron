@@ -3549,14 +3549,44 @@ impl DocHost {
             && !sessions.defers_to_turn_end(chat_id, None)
             && sessions.steer_event(chat_id, text).await? == SteerOutcome::Accepted
         {
+            self.record_event(&handle, text, true);
             return Ok("steered");
         }
+        self.record_event(&handle, text, false);
         lock(&handle.pending_events).push(text.to_owned());
         if sessions.turn_in_flight(chat_id) {
             return Ok("held");
         }
         self.drain_queue(&handle).await;
         Ok("delivered")
+    }
+
+    /// Events reach the agent silently; this leaves the person reading the
+    /// transcript a system entry with the same text, which the transcript
+    /// draws as an agent card. `steer:` ids mark one steered into a running
+    /// turn. Best effort: a failed write never blocks delivery.
+    fn record_event(&self, handle: &Arc<ChatDocHandle>, text: &str, steered: bool) {
+        let id = format!(
+            "{}{}",
+            if steered { "steer:" } else { "event:" },
+            uuid::Uuid::new_v4()
+        );
+        let entry = zeron_doc::SessionMessageEntry {
+            duration_ms: None,
+            id: id.clone(),
+            role: zeron_doc::MessageRole::System,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: format!("{id}-text"),
+                text: text.to_owned(),
+            }],
+            created_at: chrono::Utc::now().timestamp_millis(),
+            device_id: self.device_id().to_owned(),
+            status: Some(zeron_doc::MessageStatus::Complete),
+            continuation_of: None,
+        };
+        if let Err(err) = handle.doc().push_message(&entry) {
+            tracing::warn!(chat = %handle.chat_id, error = %err, "event marker not recorded");
+        }
     }
 
     /// Start a turn on the waiting background events, folded into one prompt.

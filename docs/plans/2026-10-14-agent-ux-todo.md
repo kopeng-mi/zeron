@@ -4,7 +4,7 @@ Open work from the agent-to-agent and status-line sessions, in order.
 
 ## Agent-to-agent
 
-- [ ] **Steered-in marker.** A message steered into a running turn through
+- [x] **Steered-in marker.** A message steered into a running turn through
   the agent inbox (`DeliverEvent` → steer) leaves no transcript entry. Record
   a small system entry so the transcript shows `↳ Message from X steered in`.
 - [ ] **Waiting state on rows.** A subagent blocked in

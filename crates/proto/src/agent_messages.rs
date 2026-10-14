@@ -160,6 +160,8 @@ pub struct AgentCard {
     pub body: String,
     /// The sender is blocked until this chat replies.
     pub waiting: bool,
+    /// Delivered into a turn that was already running.
+    pub steered: bool,
 }
 
 /// In a subagent's header: it is blocked in `send_message { wait: true }`.
@@ -183,6 +185,7 @@ pub fn cards(text: &str) -> Option<Vec<AgentCard>> {
                     chat_id: Some(event.chat_id),
                     body: String::new(),
                     waiting: false,
+                    steered: false,
                 });
             } else if let Some(card) = cards.last_mut() {
                 card.body.push_str(line);
@@ -215,6 +218,7 @@ pub fn cards(text: &str) -> Option<Vec<AgentCard>> {
         chat_id,
         body: body.trim().to_owned(),
         waiting: header.contains(BLOCKED_WAITING),
+        steered: false,
     }])
 }
 
