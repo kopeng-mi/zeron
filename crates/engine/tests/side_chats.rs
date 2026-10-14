@@ -194,7 +194,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
         .clone()
         .expect("run carries the zeron MCP server");
     assert_eq!(mcp.name, "zeron");
-    assert_eq!(mcp.args, ["mcp"]);
+    assert_eq!(mcp.args[..2], ["mcp", "--chat"]);
     assert_eq!(mcp.env["ZERON_IPC_PORT"], "27699");
     assert_eq!(mcp.env["ZERON_CHAT_ID"], "side");
     assert_eq!(mcp.env["ZERON_DEVICE_ID"], core.device_id);

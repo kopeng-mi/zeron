@@ -65,9 +65,23 @@ pub fn with_live_windows(
 /// The status line's text: prompt-cache hit rate and how long the cache
 /// stays warm, e.g. `cache 91% · warm 58m`. `None` before a turn reports.
 pub fn cache_status(usage: Option<zeron_proto::ContextUsage>, now_ms: i64) -> Option<String> {
-    let cache = usage?.cache?;
+    let usage = usage?;
+    let memory = usage.memory_bytes.map(|bytes| {
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        if mb >= 1024.0 {
+            format!("{:.1} GB", mb / 1024.0)
+        } else {
+            format!("{} MB", mb.round() as u64)
+        }
+    });
+    let Some(cache) = usage.cache.filter(|c| c.hit_fraction().is_some()) else {
+        return memory;
+    };
     let hit = cache.hit_fraction()?;
-    let mut text = format!("cache {}%", (hit * 100.0).round() as u32);
+    let mut text = match memory {
+        Some(memory) => format!("{memory} · cache {}%", (hit * 100.0).round() as u32),
+        None => format!("cache {}%", (hit * 100.0).round() as u32),
+    };
     if let Some(left) = cache.warm_ms_left(now_ms) {
         let mins = left / 60_000;
         text.push_str(&if left == 0 {
@@ -621,6 +635,19 @@ mod tests {
         assert_eq!(cache_status(Some(usage(Some(300))), 400_000).unwrap(), "cache 90% · cold");
         assert_eq!(cache_status(Some(usage(None)), 0).unwrap(), "cache 90%");
         assert_eq!(cache_status(None, 0), None);
+        let with_memory = zeron_proto::ContextUsage {
+            memory_bytes: Some(142 * 1024 * 1024),
+            ..usage(Some(3600))
+        };
+        assert_eq!(
+            cache_status(Some(with_memory), 120_000).unwrap(),
+            "142 MB · cache 90% · warm 58m"
+        );
+        let memory_only = zeron_proto::ContextUsage {
+            memory_bytes: Some(3 * 1024 * 1024 * 1024),
+            ..Default::default()
+        };
+        assert_eq!(cache_status(Some(memory_only), 0).unwrap(), "3.0 GB");
     }
 
     #[test]

@@ -307,6 +307,54 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+        if port != 0 {
+            self.start_memory_sampler();
+        }
+    }
+
+    /// Every 15 s, measure the agent process tree of each running chat and
+    /// record it for the status line. Stops when the engine is dropped.
+    fn start_memory_sampler(&self) {
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        runtime.spawn(async move {
+            let system = Arc::new(std::sync::Mutex::new(sysinfo::System::new()));
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let Some(inner) = weak.upgrade() else { break };
+                let running: Vec<String> = lock(&inner.statuses)
+                    .iter()
+                    .filter(|(_, session)| is_active(session))
+                    .map(|(chat, _)| chat.clone())
+                    .collect();
+                let host = lock(&inner.doc_host).clone();
+                drop(inner);
+                if running.is_empty() {
+                    continue;
+                }
+                let system = system.clone();
+                let sampled = tokio::task::spawn_blocking(move || {
+                    let mut system = system.lock().unwrap_or_else(PoisonError::into_inner);
+                    crate::agent_memory::sample(&mut system, &running)
+                })
+                .await
+                .unwrap_or_default();
+                let Some(host) = host else { continue };
+                for (chat, bytes) in sampled {
+                    if let Ok(handle) = host.open(&chat) {
+                        if let Err(err) = handle.doc().update_memory(bytes) {
+                            tracing::debug!(%chat, error = %err, "memory sample not recorded");
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -1736,7 +1784,9 @@ impl Inner {
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
-            args: vec!["mcp".into()],
+            // --chat labels the process so the memory sampler can find this
+            // chat's agent (the server's parent).
+            args: vec!["mcp".into(), "--chat".into(), chat_id.to_owned()],
             env: [
                 ("ZERON_IPC_PORT".to_owned(), port.to_string()),
                 ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),

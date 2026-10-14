@@ -20,7 +20,7 @@ Open work from the agent-to-agent and status-line sessions, in order.
 Show these in each turn's footer, in the muted footer style (decided: under
 the turn footer, e.g. `42 MB · cache 91% hit · warm 3m left`):
 
-- [ ] **Memory** of the spawned agent's process tree (resident set), sampled
+- [x] **Memory** of the spawned agent's process tree (resident set), sampled
   while the turn runs.
 - [x] **Cache hit / miss** per turn from usage: `cache_read_input_tokens`
   vs `cache_creation_input_tokens` + `input_tokens` (Claude; other harnesses

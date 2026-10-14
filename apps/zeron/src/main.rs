@@ -47,7 +47,13 @@ enum Command {
     /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
-    Mcp,
+    Mcp {
+        /// The chat this server speaks for. Only a label on the process:
+        /// the engine finds the agent's process tree by it (the identity
+        /// itself comes from ZERON_CHAT_ID).
+        #[arg(long)]
+        chat: Option<String>,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -191,7 +197,7 @@ fn main() -> anyhow::Result<()> {
         use tracing_subscriber::util::SubscriberInitExt;
         // `zeron mcp` owns stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp)) {
+        if matches!(&cli.command, Some(Command::Mcp { .. })) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -255,7 +261,7 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
         }
-        Some(Command::Mcp) => {
+        Some(Command::Mcp { .. }) => {
             // One bridge per agent session, and it only relays: stdio
             // requests out to the engine over IPC and replies back. Two
             // workers keep a burst of parallel tool calls (large replies to

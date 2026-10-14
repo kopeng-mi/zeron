@@ -104,6 +104,7 @@ similar = "2"
 # async / net
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 libc = "0.2"
 gethostname = "1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

@@ -9,6 +9,7 @@ publish.workspace = true
 zeron-preview.workspace = true
 zeron-proto.workspace = true
 zeron-doc.workspace = true
+sysinfo.workspace = true
 zeron-sync.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
