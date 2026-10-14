@@ -51,8 +51,10 @@ user asks for one. Side chats cannot create chats. Discover hosts with \
 list_devices, then list_projects, list_harnesses and list_models for a \
 device; a project fixes its host. Without project or device, chats are \
 created on the local engine. If a notice says a chat is waiting for an \
-answer, answer it with respond_to_input. archive_chat tidies up children \
+answer, answer it with send_message. chat_status shows every child at once; stop_chat stops one; zeron_help has the full guide. archive_chat tidies up children \
 you no longer need.";
+
+const SUBAGENT_INSTRUCTIONS: &str = "You are a subagent: another Zeron chat (your parent, the orchestrator) gave you this task. Do the work and write your result as your final message; it goes to your parent automatically when your turn ends. send_message reaches only your parent: use it for a question (wait: true if you can't continue without the answer) or a finding it should know now, not for your final report or progress pings. read_chat writes your parent's, a sibling's or your own transcript to a file. zeron_help explains more.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -99,6 +101,7 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
     }
     drop(out_tx);
     let _ = writer.await;
+    crate::a2a::clean_files();
     Ok(())
 }
 
@@ -165,17 +168,20 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": match tools.role().await {
+                        crate::a2a::Role::Subagent { .. } => SUBAGENT_INSTRUCTIONS,
+                        _ => INSTRUCTIONS,
+                    },
                 }),
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list() })),
+        "tools/list" => ok_response(id, json!({ "tools": tools.list().await })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
             };
-            if !tools.has(name) {
+            if !tools.has(name).await {
                 return error_response(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
             }
             let arguments = params

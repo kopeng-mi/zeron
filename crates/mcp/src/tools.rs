@@ -20,6 +20,7 @@ use zeron_proto::{
     Space, UserInputAnswer,
 };
 
+use crate::a2a::{self, Role};
 use crate::search::{Matcher, rank};
 use crate::transcript::{RenderOptions, RenderedMessage, SubagentRef, render_entries};
 use crate::zeron::{HarnessInfo, MessageTurn, TurnOutcome, Zeron, session_for, short};
@@ -50,6 +51,10 @@ pub struct Tools {
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
+    /// Orchestrator, subagent or free: read once from the origin chat.
+    role: tokio::sync::OnceCell<Role>,
+    /// Where read_chat / read_subagent write transcript files.
+    files: std::path::PathBuf,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -72,34 +77,51 @@ fn device_schema() -> Value {
 }
 
 fn catalog() -> Vec<ToolDef> {
+    let read_args = |extra: Value| {
+        let mut props = json!({
+            "reasoning": { "type": "boolean", "default": false, "description": "Include model thinking." },
+            "tools": { "type": "boolean", "default": true, "description": "Include one line per tool call." }
+        });
+        if let (Some(props), Some(extra)) = (props.as_object_mut(), extra.as_object()) {
+            props.extend(extra.clone());
+        }
+        props
+    };
     let mut tools = vec![
         ToolDef {
             name: "whoami",
-            description: "Which chat and device this server speaks for, the engine's workspace mode, and the chats you are waiting to hear back from (pendingNotices).",
+            description: "Your chat, role (orchestrator or subagent), parent, and the chats whose results you're waiting on.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
+            name: "zeron_help",
+            description: "Detailed usage guide. Topics: delegate, messages, status, files. Omit topic for all.",
+            input_schema: json!({ "type": "object", "properties": {
+                "topic": { "type": "string", "enum": ["delegate", "messages", "status", "files"] }
+            }}),
+        },
+        ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
+            description: "Devices in the workspace; chats and projects live on one.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: "list_projects",
-            description: "Projects: folders on specific devices. Filter by device (id or name); omit for all projects. Use ids when names or paths repeat.",
+            description: "Projects (folders on a device).",
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_harnesses",
-            description: "Agent harnesses (claude-code, codex, cursor, …) available on the chosen device. Omit device for the local engine.",
+            description: "Agent harnesses available on a device.",
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_models",
-            description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat.",
+            description: "Models a harness offers on a device; pass an id to create_chat.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "harness": { "type": "string", "description": "Harness id, e.g. claude-code or codex." },
+                    "harness": { "type": "string", "description": "e.g. claude-code, codex." },
                     "device": device_schema()
                 },
                 "required": ["harness"]
@@ -107,137 +129,122 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with their project, host device, harness/model, live status, and last activity. Newest activity first.",
+            description: "Chats with status and last activity, newest first. parent: your id lists your children.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Only chats in this project (id, path, or name)." },
-                    "device": { "type": "string", "description": "Only chats hosted on this device (id or name)." },
+                    "project": { "type": "string" },
+                    "device": { "type": "string" },
                     "include_archived": { "type": "boolean", "default": false },
-                    "parent": { "type": "string", "description": "Only chats created by this chat (id, prefix, or title) — e.g. your own id to list the chats you spawned." },
+                    "parent": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
                 }
             }),
         },
         ToolDef {
             name: "get_chat",
-            description: "One chat's metadata, live status, and any question its agent is currently blocked on.",
+            description: "One chat's metadata, status, last message, and any question it's blocked on.",
             input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
+            name: "chat_status",
+            description: "Status of your children (or one chat): idle, working, awaitingInput, errored, or offline, with the question or error.",
+            input_schema: json!({ "type": "object", "properties": {
+                "chat": { "type": "string", "description": "One chat; omit for all your children." }
+            }}),
+        },
+        ToolDef {
             name: "create_chat",
-            description: "Create a chat and optionally start it on a task. kind side (the default when you are in a chat) makes a child of your chat: use it to delegate. kind chat makes a standalone session in the sidebar; only use it when the user asks for a separate chat. Side chats cannot create chats. Choose a project and/or device; harness and model are validated on that host. Give the child a self-contained prompt: it does not see your conversation. By default the call returns at once and the child's final response comes back to you as an automatic notice when its turn ends, so keep working or end your turn rather than waiting. For several children use create_chats.",
+            description: "Start a subagent (kind side, default) or a standalone chat (kind chat). Returns at once; its final answer arrives as a notice. The prompt must be self-contained.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["chat", "side"], "description": "chat: standalone, no parent allowed. side: requires parent or origin. Omit for legacy defaults." },
-                    "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
-                    "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
-                    "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
-                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Defaults to claude-code when available." },
-                    "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
-                    "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
+                    "prompt": { "type": "string", "description": "Goal, context, constraints, what to report." },
+                    "title": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["side", "chat"] },
+                    "project": { "type": "string", "description": "Project id, path or name." },
+                    "device": { "type": "string" },
+                    "harness": { "type": "string" },
+                    "model": { "type": "string" },
+                    "reasoning": { "type": "string", "description": "e.g. low, medium, high." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
-                    "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
-                    "branch": { "type": "string", "description": "Branch label to record on the chat." },
-                    "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "prompt": { "type": "string", "description": "The task, sent right away. Make it self-contained: goal, context, constraints, and what to report back." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn ends and return the reply. Only when you need the result before you can do anything else." },
-                    "notify": { "type": "boolean", "default": true, "description": "With prompt: get the final response as an automatic notice when the turn ends (when not waiting)." },
+                    "parent": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "cwd": { "type": "string" },
+                    "wait": { "type": "boolean", "default": false, "description": "Block until the first turn ends." },
+                    "notify": { "type": "boolean", "default": true },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
         },
         ToolDef {
-            name: "read_chat",
-            description: "Read a chat's transcript as plain messages (newest window by default). Tool calls are summarized one per line.",
+            name: "send_message",
+            description: "Message a chat: steers it if working (interrupt: true stops it first), starts a turn if idle, answers it if it's waiting on a question. The reply arrives as a notice.",
             input_schema: chat_key_schema(json!({
-                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
-                "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
-                "include_reasoning": { "type": "boolean", "default": false },
-                "include_tools": { "type": "boolean", "default": true }
+                "text": { "type": "string", "description": "Message, or the answer to its pending question (an option label picks it)." },
+                "interrupt": { "type": "boolean", "default": false, "description": "Stop its running turn, then send." },
+                "answers": { "type": "array", "description": "Multi-question forms: [{question_id, labels}].", "items": {
+                    "type": "object",
+                    "properties": { "question_id": { "type": "string" }, "labels": { "type": "array", "items": { "type": "string" } } },
+                    "required": ["question_id", "labels"]
+                }},
+                "wait": { "type": "boolean", "default": false, "description": "Block until its turn ends and return the reply." },
+                "notify": { "type": "boolean", "default": true },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
+        },
+        ToolDef {
+            name: "stop_chat",
+            description: "Stop a chat's running turn.",
+            input_schema: chat_key_schema(json!({})),
+        },
+        ToolDef {
+            name: "read_chat",
+            description: "Write a chat's transcript to a Markdown file and return its path; read it with your file tools (zeron_help files).",
+            input_schema: chat_key_schema(read_args(json!({}))),
         },
         ToolDef {
             name: "read_subagent",
-            description: "Read the transcript of a subagent a chat spawned (what it said, which tools it ran, whether it is still running). Spawn chips appear in read_chat as `subagents` with an id and a status; omit `subagent` to list them all for the chat instead. Works for running, finished, and failed subagents, so use it to see why one stopped before deciding to continue it or start over. To continue or send a follow-up to a subagent of your own, do NOT spawn a new one: call SendMessage with the agent's id (the `agentId` in its Agent result) — it resumes the same subagent with its context intact, even after it finished.",
-            input_schema: chat_key_schema(json!({
-                "subagent": { "type": "string", "description": "Subagent id from read_chat, a unique fragment of it (e.g. the spawn id), or a unique fragment of its label. Omit to list the chat's subagents." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 40, "description": "How many messages, counted from the newest." },
-                "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest messages (paging backwards)." },
-                "include_reasoning": { "type": "boolean", "default": false },
-                "include_tools": { "type": "boolean", "default": true }
-            })),
+            description: "List a chat's harness subagents, or write one's transcript to a file and return its path.",
+            input_schema: chat_key_schema(read_args(json!({
+                "subagent": { "type": "string", "description": "Id or unique fragment from the list; omit to list." }
+            }))),
         },
         ToolDef {
             name: "search_chats",
-            description: "Search the content of every chat's transcript (messages, tool lines, titles), not just titles. mode 'words' (default) is forgiving: it ranks chats by how many of the query's words they contain, tolerates typos and word fragments, and weighs rare words above common ones, so a loose description like 'proot rootfs android mount' finds the chat. mode 'regex' is ripgrep-style (case-insensitive unless case_sensitive). Returns the best chats with snippets around the hits; pass a hit's offsetFromNewest to read_chat (offset, minus a few for context) to read the surrounding conversation. Scans the newest max_chats chats matching the filters; the reply says if it stopped short. Your own chat is skipped unless include_self.",
+            description: "Search all transcripts by words (typo-tolerant) or regex; returns chats with snippets.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Words to look for, or a regex in regex mode." },
+                    "query": { "type": "string" },
                     "mode": { "type": "string", "enum": ["words", "regex"], "default": "words" },
-                    "project": { "type": "string", "description": "Only chats in this project (id, path, or name)." },
-                    "device": { "type": "string", "description": "Only chats hosted on this device (id or name)." },
-                    "parent": { "type": "string", "description": "Only chats created by this chat (id, prefix, or title)." },
+                    "project": { "type": "string" },
+                    "device": { "type": "string" },
+                    "parent": { "type": "string" },
                     "include_archived": { "type": "boolean", "default": false },
-                    "include_self": { "type": "boolean", "default": false, "description": "Also search the chat you are speaking from." },
-                    "role": { "type": "string", "enum": ["user", "assistant"], "description": "Only search messages from this side." },
-                    "include_tools": { "type": "boolean", "default": true, "description": "Search the one-line tool ledger (file paths, commands)." },
+                    "include_self": { "type": "boolean", "default": false },
+                    "role": { "type": "string", "enum": ["user", "assistant"] },
+                    "include_tools": { "type": "boolean", "default": true },
                     "include_reasoning": { "type": "boolean", "default": false },
-                    "case_sensitive": { "type": "boolean", "default": false, "description": "Regex mode only." },
-                    "min_match": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5, "description": "Words mode: the share of the query (rare words weigh more) a chat must cover. Lower it for broader recall." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Chats to return." },
-                    "snippets": { "type": "integer", "minimum": 1, "maximum": 20, "default": 3, "description": "Matching messages to show per chat." },
-                    "max_chats": { "type": "integer", "minimum": 1, "maximum": SEARCH_MAX_SCAN, "default": SEARCH_DEFAULT_SCAN, "description": "How many chats (newest activity first) to scan." }
+                    "case_sensitive": { "type": "boolean", "default": false },
+                    "min_match": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
+                    "snippets": { "type": "integer", "minimum": 1, "maximum": 20, "default": 3 },
+                    "max_chats": { "type": "integer", "minimum": 1, "maximum": SEARCH_MAX_SCAN, "default": SEARCH_DEFAULT_SCAN }
                 },
                 "required": ["query"]
             }),
         },
         ToolDef {
-            name: "send_message",
-            description: "Send a message to another chat, attributed to yours. It returns at once; when the turn that handles the message ends, the chat's final response comes back to you as an automatic notice (notify=false for an FYI that needs no answer). The receiver is told its answer is routed back, so it won't message you. mode auto starts a turn when the chat is idle and otherwise steers the running turn at its next input boundary without interrupting it; queue holds the message until the current turn ends. Use wait=true only when you can't continue without the answer. To give several chats work at once use send_messages. Don't use this to reply to a notice or to ask a chat how it's going.",
-            input_schema: chat_key_schema(json!({
-                "text": { "type": "string" },
-                "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
-                "wait": { "type": "boolean", "default": false, "description": "Block until the turn that handles this message ends and return the reply." },
-                "notify": { "type": "boolean", "default": true, "description": "Get the final response as an automatic notice when the turn ends (when not waiting)." },
-                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
-            })),
-        },
-        ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat's turn ends: the one handling your last message to it, else its current one. Returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the replies. Rarely needed: results arrive as automatic notices without waiting. Use it only when you can't make progress until a specific chat answers; a wait that returns the result also clears its pending notice.",
+            description: "Block until a chat's turn ends. Rarely needed: results arrive as notices.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
-            })),
-        },
-        ToolDef {
-            name: "interrupt_chat",
-            description: "Stop the chat's running turn. Clears your pending notice about it.",
-            input_schema: chat_key_schema(json!({})),
-        },
-        ToolDef {
-            name: "respond_to_input",
-            description: "Answer a question the chat's agent is blocked on (see get_chat / wait_for_turn pendingInput). Labels are the option strings, or free text for open questions.",
-            input_schema: chat_key_schema(json!({
-                "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." },
-                "answers": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question_id": { "type": "string" },
-                            "labels": { "type": "array", "items": { "type": "string" } }
-                        },
-                        "required": ["question_id", "labels"]
-                    }
-                }
             })),
         },
         ToolDef {
             name: "archive_chat",
-            description: "Archive a chat (hide it from the active sidebar list); pass archived=false to restore. Use it to tidy up chats you created.",
+            description: "Archive a chat (archived: false restores it).",
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true }
             })),
@@ -247,12 +254,12 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create several chats at once, each with its own prompt, so all the work starts together (use it even if your tool calls run one at a time). Each request takes create_chat arguments. Returns immediately; each child's final response arrives as its own automatic notice (batched when they finish together). Results keep request order and report per-request errors; successful requests are not rolled back.",
+            "Start several chats at once (requests: create_chat arguments). Each answer arrives as its own notice.",
         ),
         (
             "send_messages",
             "send_message",
-            "Send messages to several chats at once. Each request takes send_message arguments; each reply arrives as an automatic notice. Results keep request order and report per-request errors; successful sends are not rolled back. Don't put two dependent messages to the same chat in one batch.",
+            "Message several chats at once (requests: send_message arguments).",
         ),
     ] {
         let item_schema = tools
@@ -269,6 +276,38 @@ fn catalog() -> Vec<ToolDef> {
                 "required": ["requests"],
             }),
         });
+    }
+    tools
+}
+
+/// The tools `role` lists, in catalog order, with the subagent's own
+/// shapes for the two it shares.
+fn catalog_for(role: &Role) -> Vec<ToolDef> {
+    let mut tools: Vec<ToolDef> = catalog()
+        .into_iter()
+        .filter(|tool| role.tools().contains(&tool.name))
+        .collect();
+    if matches!(role, Role::Subagent { .. }) {
+        for tool in &mut tools {
+            match tool.name {
+                "send_message" => {
+                    tool.description = "Message your parent (orchestrator): a question, a finding, a status. Lands in its agent inbox, never its composer queue. Your final answer is sent automatically; don't send it here.";
+                    tool.input_schema = json!({
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" },
+                            "wait": { "type": "boolean", "default": false, "description": "Block until your parent replies; the reply is the result." },
+                            "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                        },
+                        "required": ["text"]
+                    });
+                }
+                "read_chat" => {
+                    tool.description = "Write your parent's, a sibling's or your own transcript to a Markdown file and return its path (zeron_help files).";
+                }
+                _ => {}
+            }
+        }
     }
     tools
 }
@@ -353,22 +392,18 @@ struct CreateChatArgs {
 struct ReadSubagentArgs {
     chat: String,
     subagent: Option<String>,
-    limit: Option<usize>,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     include_reasoning: bool,
+    #[serde(alias = "tools")]
     include_tools: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct ReadChatArgs {
     chat: String,
-    limit: Option<usize>,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     include_reasoning: bool,
+    #[serde(alias = "tools")]
     include_tools: Option<bool>,
 }
 
@@ -404,9 +439,15 @@ struct ScannedChat {
 
 #[derive(Deserialize)]
 struct SendArgs {
-    chat: String,
+    /// Required for orchestrators; a subagent always messages its parent.
+    chat: Option<String>,
+    #[serde(default)]
     text: String,
+    /// Hidden: the old auto/run/steer/queue switch.
     mode: Option<String>,
+    #[serde(default)]
+    interrupt: bool,
+    answers: Option<Vec<AnswerArg>>,
     #[serde(default)]
     wait: bool,
     notify: Option<bool>,
@@ -433,7 +474,7 @@ struct RespondArgs {
     answers: Vec<AnswerArg>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct AnswerArg {
     question_id: String,
     labels: Vec<String>,
@@ -531,22 +572,69 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
+            role: Default::default(),
+            files: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                a2a::files_dir().join(
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        .to_string(),
+                )
+            },
         }
     }
 
-    pub fn list(&self) -> Vec<ToolDef> {
-        catalog()
+    /// The origin chat's role. A chat that can't be resolved yet reads as an
+    /// orchestrator for this connection: it keeps working, and the engine
+    /// still refuses a side chat creating chats.
+    pub async fn role(&self) -> &Role {
+        self.role
+            .get_or_init(|| async {
+                let Some(me) = self.zeron.origin().chat_id.clone() else {
+                    return Role::Free;
+                };
+                match self.zeron.resolve_chat(&me).await {
+                    Ok(chat) => match chat.parent_chat_id {
+                        Some(parent) => Role::Subagent { me, parent },
+                        None => Role::Orchestrator { me },
+                    },
+                    Err(_) => Role::Orchestrator { me },
+                }
+            })
+            .await
     }
 
-    pub fn has(&self, name: &str) -> bool {
-        catalog().iter().any(|t| t.name == name)
+    pub async fn list(&self) -> Vec<ToolDef> {
+        catalog_for(self.role().await)
+    }
+
+    pub async fn has(&self, name: &str) -> bool {
+        self.role().await.allows(a2a::canonical(name))
+    }
+
+    /// Resolve a chat key and check this chat may touch it.
+    async fn guarded(&self, key: &str, control: bool) -> anyhow::Result<Chat> {
+        let chat = self.zeron.resolve_chat(key).await?;
+        let role = self.role().await;
+        let check = if control {
+            role.may_control(&chat)
+        } else {
+            role.may_read(&chat)
+        };
+        check.map_err(anyhow::Error::msg)?;
+        Ok(chat)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        let name = a2a::canonical(name);
+        if !self.role().await.allows(name) {
+            return Err(format!("{name} is not available to this chat (see whoami)"));
+        }
         let result = match name {
             "whoami" => self.whoami().await,
+            "zeron_help" => Ok(json!(a2a::help(args.get("topic").and_then(Value::as_str)))),
+            "chat_status" => self.chat_status(args.get("chat").and_then(Value::as_str)).await,
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
@@ -561,7 +649,7 @@ impl Tools {
             "search_chats" => self.search_chats(parse(args)?).await,
             "send_message" => self.send_message(parse(args)?).await,
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
-            "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
+            "stop_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -626,7 +714,17 @@ impl Tools {
                 .unwrap_or(Value::Null),
             None => Value::Null,
         };
+        let role = match self.role().await {
+            Role::Free => json!({ "role": "free" }),
+            Role::Orchestrator { .. } => json!({ "role": "orchestrator" }),
+            Role::Subagent { parent, .. } => json!({
+                "role": "subagent",
+                "parent": parent,
+                "note": "Your final answer goes to your parent automatically when your turn ends. send_message reaches only your parent.",
+            }),
+        };
         Ok(json!({
+            "role": role,
             "chat": chat,
             "pendingNotices": pending_notices,
             "originDeviceId": origin.device_id,
@@ -769,7 +867,7 @@ impl Tools {
     }
 
     async fn get_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, false).await?;
         let (spaces, sessions, entries) = tokio::try_join!(
             self.zeron.spaces(),
             self.zeron.sessions(),
@@ -997,11 +1095,11 @@ impl Tools {
     }
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self
-            .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
-            .await?;
+        let chat = self.guarded(&args.chat, false).await?;
+        let (entries, sessions) = tokio::try_join!(
+            self.zeron.transcript_on(&chat.id, Some(&chat.device_id)),
+            self.zeron.sessions()
+        )?;
         let rendered = render_entries(
             &entries,
             RenderOptions {
@@ -1009,25 +1107,30 @@ impl Tools {
                 include_tools: args.include_tools.unwrap_or(true),
             },
         );
-        let total = rendered.len();
-        let limit = args.limit.unwrap_or(40).clamp(1, 500);
-        let end = total.saturating_sub(args.offset);
-        let start = end.saturating_sub(limit);
-        let window = &rendered[start..end];
+        let (status, _) = status_of(session_for(&sessions, &chat).as_ref());
+        let harness = chat
+            .config
+            .as_ref()
+            .map(|c| c.harness.as_str())
+            .unwrap_or("unknown");
+        let header = format!(
+            "{} · {} · {harness} · {status}",
+            chat.title.as_deref().unwrap_or("Untitled"),
+            short(&chat.id)
+        );
+        let path = a2a::write_transcript(&self.files, &a2a::file_stem(&chat.id), &header, &rendered)
+            .context("writing the transcript file")?;
         Ok(json!({
-            "chatId": chat.id,
-            "title": chat.title,
-            "total": total,
-            "returned": window.len(),
-            "olderRemaining": start,
-            "newerSkipped": total - end,
+            "path": path,
+            "format": "markdown (zeron_help files)",
+            "messages": rendered.len(),
+            "status": status,
             "pendingInput": last_pending_input(&rendered),
-            "messages": window,
         }))
     }
 
     async fn read_subagent(&self, args: ReadSubagentArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, false).await?;
         let entries = self.zeron.transcript(&chat.id).await?;
         let spawned: Vec<SubagentRef> = render_entries(&entries, RenderOptions::default())
             .into_iter()
@@ -1051,19 +1154,151 @@ impl Tools {
                 include_tools: args.include_tools.unwrap_or(true),
             },
         );
-        let total = rendered.len();
-        let limit = args.limit.unwrap_or(40).clamp(1, 500);
-        let end = total.saturating_sub(args.offset);
-        let start = end.saturating_sub(limit);
+        let header = format!(
+            "{} · subagent of {} · {}",
+            found.name,
+            short(&chat.id),
+            found.status.unwrap_or("unknown")
+        );
+        let path = a2a::write_transcript(&self.files, &a2a::file_stem(&found.id), &header, &rendered)
+            .context("writing the transcript file")?;
         Ok(json!({
-            "chatId": chat.id,
+            "path": path,
+            "format": "markdown (zeron_help files)",
+            "messages": rendered.len(),
             "subagent": found,
-            "total": total,
-            "returned": end - start,
-            "olderRemaining": start,
-            "newerSkipped": total - end,
-            "messages": &rendered[start..end],
         }))
+    }
+
+    /// Children's (or one chat's) status, the way an orchestrator checks on
+    /// its subagents without reading transcripts. `offline`: the row says
+    /// working but its host has gone quiet past the staleness window.
+    async fn chat_status(&self, key: Option<&str>) -> anyhow::Result<Value> {
+        let chats = match key {
+            Some(key) => vec![self.guarded(key, false).await?],
+            None => {
+                let me = match self.role().await {
+                    Role::Orchestrator { me } => me.clone(),
+                    Role::Subagent { parent, .. } => parent.clone(),
+                    Role::Free => anyhow::bail!("not in a chat: pass chat"),
+                };
+                let mut chats = self.zeron.chats().await?;
+                chats.retain(|c| !c.archived && c.parent_chat_id.as_deref() == Some(me.as_str()));
+                chats
+            }
+        };
+        let sessions = self.zeron.sessions().await?;
+        let now = chrono::Utc::now();
+        let mut rows = Vec::with_capacity(chats.len());
+        for chat in &chats {
+            let session = session_for(&sessions, chat);
+            let stale = session.as_ref().is_some_and(|s| {
+                s.status == SessionStatus::Working && now - s.updated_at > SESSION_STALE
+            });
+            let (status, _) = status_of(session.as_ref());
+            let status = if stale { "offline".to_owned() } else { status };
+            let mut row = json!({
+                "chat": chat.id,
+                "title": chat.title,
+                "status": status,
+                "lastActivity": chat.last_message_at.unwrap_or(chat.created_at),
+            });
+            if status == "awaitingInput" || status == "errored" {
+                if let Ok(entries) = self.zeron.transcript_on(&chat.id, Some(&chat.device_id)).await {
+                    let rendered = render_entries(&entries, RenderOptions::default());
+                    if let Some(input) = last_pending_input(&rendered) {
+                        row["question"] = input;
+                    }
+                    if let Some(error) = rendered.iter().rev().find_map(|m| m.errors.last()) {
+                        row["error"] = json!(error);
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        Ok(json!({ "chats": rows }))
+    }
+
+    /// A subagent's message to its orchestrator: into the parent's agent
+    /// inbox (steered into its running turn or batched into its next one),
+    /// never its composer queue. With `wait`, block until the parent's
+    /// send_message lands here as the reply.
+    async fn message_parent(
+        &self,
+        me: &str,
+        parent: &str,
+        text: &str,
+        wait: bool,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<Value> {
+        let title = match self.zeron.resolve_chat(me).await {
+            Ok(chat) => chat.title.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        let label = if title.trim().is_empty() {
+            short(me).to_owned()
+        } else {
+            format!("{} ({})", title.trim(), short(me))
+        };
+        let ask = if wait {
+            "It is blocked waiting on your answer: send_message it."
+        } else {
+            "Reply with send_message only if it needs an answer."
+        };
+        let body = format!(
+            "{}{label}, id {me}, your subagent. {ask}]\n\n{text}",
+            zeron_proto::agent_messages::MESSAGE_PREFIX
+        );
+        let parent_chat = self.zeron.resolve_chat(parent).await?;
+        let delivery = self
+            .zeron
+            .call(
+                methods::DELIVER_EVENT,
+                json!({ "chatId": parent, "text": body, "targetDeviceId": parent_chat.device_id }),
+            )
+            .await?;
+        let mut result = json!({
+            "to": parent,
+            "delivery": delivery.get("delivery").cloned().unwrap_or(Value::Null),
+        });
+        if !wait {
+            return Ok(result);
+        }
+        let deadline = Instant::now() + wait_duration(timeout_secs);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let poll = left.min(Duration::from_secs(20));
+            let reply = self
+                .zeron
+                .call(
+                    methods::AWAIT_AGENT_REPLY,
+                    json!({ "chatId": me, "waitMs": poll.as_millis() as u64 }),
+                )
+                .await?;
+            if let Some(text) = reply.get("text").and_then(Value::as_str) {
+                result["reply"] = json!(text);
+                return Ok(result);
+            }
+        }
+        // Gave up: a reply that slipped in at the last moment still counts,
+        // and later ones arrive as ordinary messages.
+        let late = self
+            .zeron
+            .call(methods::CANCEL_AGENT_REPLY, json!({ "chatId": me }))
+            .await
+            .ok()
+            .and_then(|r| r.get("text").and_then(Value::as_str).map(str::to_owned));
+        match late {
+            Some(text) => result["reply"] = json!(text),
+            None => {
+                result["timedOut"] = json!(true);
+                result["note"] = json!("No reply yet. It will arrive as a message in this chat; continue with your best judgement.");
+            }
+        }
+        Ok(result)
     }
 
     async fn search_chats(&self, args: SearchArgs) -> anyhow::Result<Value> {
@@ -1184,10 +1419,48 @@ impl Tools {
 
     async fn send_message(&self, args: SendArgs) -> anyhow::Result<Value> {
         let text = args.text.trim();
-        if text.is_empty() {
-            anyhow::bail!("text is empty");
+        if let Role::Subagent { me, parent } = self.role().await.clone() {
+            anyhow::ensure!(!text.is_empty(), "text is empty");
+            return self
+                .message_parent(&me, &parent, text, args.wait, args.timeout_secs)
+                .await;
         }
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let key = args
+            .chat
+            .as_deref()
+            .context("chat is required: which chat to message")?;
+        let chat = self.guarded(key, true).await?;
+        // A child blocked in send_message {wait: true} takes this as its
+        // tool result instead of a new turn.
+        if !text.is_empty() && args.answers.is_none() {
+            let reply = self
+                .zeron
+                .call(
+                    methods::DELIVER_AGENT_REPLY,
+                    json!({ "chatId": chat.id, "text": text, "targetDeviceId": chat.device_id }),
+                )
+                .await;
+            if reply.is_ok_and(|r| r["delivered"] == true) {
+                return Ok(json!({
+                    "chatId": chat.id,
+                    "title": chat.title,
+                    "sent": { "delivery": "reply", "note": "It was waiting on you: your text is its tool result." },
+                }));
+            }
+        }
+        let sessions = self.zeron.sessions().await?;
+        let waiting = session_for(&sessions, &chat)
+            .is_some_and(|s| s.status == SessionStatus::AwaitingInput);
+        if waiting || args.answers.is_some() {
+            return self.answer(&chat, text, args.answers).await;
+        }
+        anyhow::ensure!(!text.is_empty(), "text is empty");
+        if args.interrupt {
+            self.zeron
+                .queue_command(&chat.id, &SessionCommandPayload::Interrupt {})
+                .await?;
+            self.settle(&chat, Duration::from_secs(8)).await;
+        }
         if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",
@@ -1325,7 +1598,7 @@ impl Tools {
     }
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, true).await?;
         let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
         let turn = match pending {
             Some(pending) => {
@@ -1351,7 +1624,7 @@ impl Tools {
     }
 
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, true).await?;
         let archived = args.archived.unwrap_or(true);
         self.zeron
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
@@ -1360,7 +1633,7 @@ impl Tools {
     }
 
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, true).await?;
         let command_id = self
             .zeron
             .queue_command(&chat.id, &SessionCommandPayload::Interrupt {})
@@ -1371,7 +1644,80 @@ impl Tools {
     }
 
     async fn respond_to_input(&self, args: RespondArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.guarded(&args.chat, true).await?;
+        self.respond(&chat, args.request_id, args.answers).await
+    }
+
+    /// Answer `chat`'s pending question from free text: a text equal to an
+    /// option label picks it, anything else is a free-text answer to every
+    /// open question. `answers` overrides for multi-question forms.
+    async fn answer(
+        &self,
+        chat: &Chat,
+        text: &str,
+        answers: Option<Vec<AnswerArg>>,
+    ) -> anyhow::Result<Value> {
+        if let Some(answers) = answers {
+            return self.respond(chat, None, answers).await;
+        }
+        anyhow::ensure!(!text.is_empty(), "text is empty: it would answer the pending question");
+        let entries = self
+            .zeron
+            .transcript_on(&chat.id, Some(&chat.device_id))
+            .await?;
+        let rendered = render_entries(&entries, RenderOptions::default());
+        let pending = last_pending_input(&rendered)
+            .with_context(|| format!("chat {} has no pending question", short(&chat.id)))?;
+        let answers = pending["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|q| {
+                let id = q.get("id").and_then(Value::as_str)?;
+                let label = q["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| o.get("label").and_then(Value::as_str))
+                    .find(|l| l.eq_ignore_ascii_case(text))
+                    .unwrap_or(text);
+                Some(AnswerArg {
+                    question_id: id.to_owned(),
+                    labels: vec![label.to_owned()],
+                })
+            })
+            .collect();
+        let request = pending["requestId"].as_str().map(str::to_owned);
+        let mut result = self.respond(chat, request, answers).await?;
+        result["delivery"] = json!("answer");
+        Ok(result)
+    }
+
+    /// Wait briefly for a stopped chat's turn to wind down.
+    async fn settle(&self, chat: &Chat, max: Duration) {
+        let deadline = Instant::now() + max;
+        while Instant::now() < deadline {
+            let working = self.zeron.sessions().await.ok().is_some_and(|sessions| {
+                session_for(&sessions, chat).is_some_and(|s| s.status == SessionStatus::Working)
+            });
+            if !working {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn respond(
+        &self,
+        chat: &Chat,
+        request_id: Option<String>,
+        answers: Vec<AnswerArg>,
+    ) -> anyhow::Result<Value> {
+        let args = RespondArgs {
+            chat: chat.id.clone(),
+            request_id,
+            answers,
+        };
         let request_id = match args.request_id {
             Some(id) => id,
             None => {
@@ -1745,6 +2091,8 @@ mod tests {
         alpha_subagents: bool,
         /// Replaces the assistant reply in Beta's transcript.
         beta_reply: Option<String>,
+        /// A subagent is blocked in send_message {wait: true}.
+        child_waiting: bool,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1883,6 +2231,18 @@ mod tests {
                     RpcReply::Value(json!({ "ok": true, "cancelled": true }))
                 }
                 methods::LIST_TURN_NOTICES => RpcReply::Value(json!({ "watches": [] })),
+                methods::DELIVER_EVENT | methods::DELIVER_AGENT_REPLY | methods::CANCEL_AGENT_REPLY => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(json!({
+                        "delivery": "held",
+                        "delivered": self.child_waiting,
+                        "text": null,
+                    }))
+                }
+                methods::AWAIT_AGENT_REPLY => RpcReply::Value(json!({ "text": "use the v2 API" })),
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1900,6 +2260,11 @@ mod tests {
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
+    }
+
+    /// The transcript file a read tool wrote.
+    fn file(result: &Value) -> String {
+        std::fs::read_to_string(result["path"].as_str().expect("a path")).unwrap()
     }
 
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
@@ -1932,7 +2297,8 @@ mod tests {
             .call("read_chat", json!({ "chat": "alpha" }))
             .await
             .unwrap();
-        assert_eq!(read["messages"][0]["subagents"][0]["status"], "running");
+        assert!(file(&read).contains("> subagent "));
+        assert!(file(&read).contains(" running Agent: "));
 
         let listed = tools
             .call("read_subagent", json!({ "chat": "alpha" }))
@@ -1948,7 +2314,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(live["messages"][0]["text"], "still reading");
+        assert!(file(&live).contains("still reading"));
 
         // A label fragment resolves; the finished one comes from its blob.
         let frozen = tools
@@ -1959,7 +2325,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(frozen["subagent"]["status"], "done");
-        assert_eq!(frozen["messages"][0]["text"], "found 3 bugs");
+        assert!(file(&frozen).contains("found 3 bugs"));
 
         let err = tools
             .call(
@@ -1986,16 +2352,11 @@ mod tests {
             .call("read_chat", json!({ "chat": "alpha" }))
             .await
             .unwrap();
-        assert_eq!(read["total"], 2);
-        assert_eq!(read["messages"][1]["text"], "hello back");
-
-        let read = tools
-            .call("read_chat", json!({ "chat": "chat-alpha", "limit": 1 }))
-            .await
-            .unwrap();
-        assert_eq!(read["returned"], 1);
-        assert_eq!(read["olderRemaining"], 1);
-        assert_eq!(read["messages"][0]["id"], "a1");
+        assert_eq!(read["messages"], 2);
+        let text = file(&read);
+        assert!(text.starts_with("# "));
+        assert!(text.contains("\n## 1 user ") && text.contains("\n## 2 assistant "));
+        assert!(text.contains("hello back"));
     }
 
     #[tokio::test]
@@ -2020,15 +2381,12 @@ mod tests {
         assert_eq!(m["offsetFromNewest"], 0);
         assert!(m["snippet"].as_str().unwrap().contains("idle reaper"));
 
-        // The offset drops straight into read_chat.
+        // The hit's chat reads straight into a file.
         let read = tools
-            .call(
-                "read_chat",
-                json!({ "chat": "Beta", "limit": 1, "offset": m["offsetFromNewest"] }),
-            )
+            .call("read_chat", json!({ "chat": "Beta" }))
             .await
             .unwrap();
-        assert_eq!(read["messages"][0]["id"], m["messageId"]);
+        assert!(read["messages"].as_u64().unwrap() > 0);
 
         let regex = tools
             .call(
@@ -2440,6 +2798,111 @@ mod tests {
         assert!(world.writes.lock().unwrap().is_empty());
     }
 
+    fn subagent(world: Arc<World>) -> Tools {
+        tools(
+            world,
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+            },
+        )
+    }
+
+    fn written(world: &World, method: &str) -> Vec<Value> {
+        world
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn subagents_list_a_small_tool_set() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            ..Default::default()
+        });
+        let names: Vec<&str> = subagent(world).list().await.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["whoami", "zeron_help", "get_chat", "send_message", "read_chat"]);
+    }
+
+    #[tokio::test]
+    async fn subagent_messages_go_to_the_parents_inbox_never_a_queue_row() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            ..Default::default()
+        });
+        let child = subagent(world.clone());
+        // A chat argument is ignored: it always reaches the parent.
+        let sent = child
+            .call("send_message", json!({ "chat": "Gamma", "text": "found the bug in auth.rs" }))
+            .await
+            .unwrap();
+        assert_eq!(sent["to"], "chat-alpha-1");
+        let events = written(&world, methods::DELIVER_EVENT);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["chatId"], "chat-alpha-1");
+        assert!(events[0]["text"].as_str().unwrap().ends_with("found the bug in auth.rs"));
+        assert!(written(&world, methods::QUEUE_MESSAGE).is_empty());
+        assert!(written(&world, methods::QUEUE_COMMAND).is_empty());
+
+        let asked = child
+            .call("send_message", json!({ "text": "v1 or v2?", "wait": true }))
+            .await
+            .unwrap();
+        assert_eq!(asked["reply"], "use the v2 API");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_child_gets_the_orchestrators_text_as_its_reply() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            child_waiting: true,
+            ..Default::default()
+        });
+        let parent = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        let sent = parent
+            .call("send_message", json!({ "chat": "Beta", "text": "use v2" }))
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "reply");
+        assert_eq!(written(&world, methods::DELIVER_AGENT_REPLY).len(), 1);
+        assert!(written(&world, methods::QUEUE_COMMAND).is_empty());
+    }
+
+    #[tokio::test]
+    async fn orchestrators_cannot_touch_another_orchestrators_children() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-other".into()),
+            ..Default::default()
+        });
+        let alpha = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        for (tool, args) in [
+            ("send_message", json!({ "chat": "Beta", "text": "hi" })),
+            ("stop_chat", json!({ "chat": "Beta" })),
+            ("interrupt_chat", json!({ "chat": "Beta" })),
+        ] {
+            let error = alpha.call(tool, args).await.unwrap_err();
+            assert!(error.contains("another orchestrator"), "{tool}: {error}");
+        }
+        assert!(world.writes.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn side_chats_cannot_create_chats_or_be_parents() {
         let world = Arc::new(World {
@@ -2458,22 +2921,17 @@ mod tests {
                 side.call("create_chat", args)
                     .await
                     .unwrap_err()
-                    .contains("Side chats cannot")
+                    .contains("not available to this chat")
             );
         }
-        let batch = side
-            .call(
+        assert!(
+            side.call(
                 "create_chats",
                 json!({"requests":[{}, {"parent":"Alpha"}, {"kind":"chat"}]}),
             )
             .await
-            .unwrap();
-        assert!(
-            batch["results"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|r| r["isError"] == true)
+            .unwrap_err()
+            .contains("not available to this chat")
         );
         let root = tools(world.clone(), Origin::default());
         assert!(
@@ -3116,7 +3574,12 @@ mod tests {
             .unwrap();
         let writes = world.writes.lock().unwrap();
         assert!(writes.iter().all(|(m, _)| m != methods::NOTIFY_TURN_END));
-        let prompt = writes[0].1["command"]["request"]["prompt"]
+        let command = &writes
+            .iter()
+            .find(|(m, _)| m == methods::QUEUE_COMMAND)
+            .unwrap()
+            .1;
+        let prompt = command["command"]["request"]["prompt"]
             .as_str()
             .unwrap();
         assert!(prompt.contains("It doesn't need a reply."), "{prompt}");
