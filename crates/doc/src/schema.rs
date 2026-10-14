@@ -388,22 +388,6 @@ impl SessionDoc {
         self.write_context_usage(previous, next)
     }
 
-    /// The agent's sampled memory. Small swings (under 2%) are not written,
-    /// so a steady agent doesn't churn the synced doc.
-    pub fn update_memory(&self, bytes: u64) -> Result<(), DocError> {
-        let previous = self.context_usage().unwrap_or_default();
-        if let Some(old) = previous.memory_bytes {
-            if old.abs_diff(bytes) * 50 < old.max(1) {
-                return Ok(());
-            }
-        }
-        let next = zeron_proto::ContextUsage {
-            memory_bytes: Some(bytes),
-            ..previous
-        };
-        self.write_context_usage(previous, next)
-    }
-
     fn write_context_usage(
         &self,
         previous: zeron_proto::ContextUsage,

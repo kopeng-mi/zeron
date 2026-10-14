@@ -64,17 +64,26 @@ pub fn with_live_windows(
 
 /// The status line's text: prompt-cache hit rate and how long the cache
 /// stays warm, e.g. `cache 91% · warm 58m`. `None` before a turn reports.
-pub fn cache_status(usage: Option<zeron_proto::ContextUsage>, now_ms: i64) -> Option<String> {
-    let usage = usage?;
-    let memory = usage.memory_bytes.map(|bytes| {
-        let mb = bytes as f64 / (1024.0 * 1024.0);
-        if mb >= 1024.0 {
-            format!("{:.1} GB", mb / 1024.0)
-        } else {
-            format!("{} MB", mb.round() as u64)
-        }
-    });
-    let Some(cache) = usage.cache.filter(|c| c.hit_fraction().is_some()) else {
+/// `142 MB`, `1.3 GB`: an agent's resident memory, short. Pure.
+pub fn memory_label(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{} MB", mb.round() as u64)
+    }
+}
+
+pub fn cache_status(
+    usage: Option<zeron_proto::ContextUsage>,
+    memory_bytes: Option<u64>,
+    now_ms: i64,
+) -> Option<String> {
+    let memory = memory_bytes.map(memory_label);
+    let Some(cache) = usage
+        .and_then(|u| u.cache)
+        .filter(|c| c.hit_fraction().is_some())
+    else {
         return memory;
     };
     let hit = cache.hit_fraction()?;
@@ -553,7 +562,15 @@ impl Render for AccountUsage {
                 cx,
             )
         });
-        let status = cache_status(self.state.read(cx).context_usage, chrono::Utc::now().timestamp_millis()).map(|text| {
+        let status = {
+            let state = self.state.read(cx);
+            let memory = state
+                .selected_chat
+                .as_deref()
+                .and_then(|chat| state.agent_memory.get(chat).copied());
+            cache_status(state.context_usage, memory, chrono::Utc::now().timestamp_millis())
+        }
+        .map(|text| {
             div()
                 .flex_none()
                 .pr(px(4.0))
@@ -631,23 +648,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(cache_status(Some(usage(Some(3600))), 120_000).unwrap(), "cache 90% · warm 58m");
-        assert_eq!(cache_status(Some(usage(Some(300))), 400_000).unwrap(), "cache 90% · cold");
-        assert_eq!(cache_status(Some(usage(None)), 0).unwrap(), "cache 90%");
-        assert_eq!(cache_status(None, 0), None);
-        let with_memory = zeron_proto::ContextUsage {
-            memory_bytes: Some(142 * 1024 * 1024),
-            ..usage(Some(3600))
-        };
+        assert_eq!(cache_status(Some(usage(Some(3600))), None, 120_000).unwrap(), "cache 90% · warm 58m");
+        assert_eq!(cache_status(Some(usage(Some(300))), None, 400_000).unwrap(), "cache 90% · cold");
+        assert_eq!(cache_status(Some(usage(None)), None, 0).unwrap(), "cache 90%");
+        assert_eq!(cache_status(None, None, 0), None);
         assert_eq!(
-            cache_status(Some(with_memory), 120_000).unwrap(),
+            cache_status(Some(usage(Some(3600))), Some(142 * 1024 * 1024), 120_000).unwrap(),
             "142 MB · cache 90% · warm 58m"
         );
-        let memory_only = zeron_proto::ContextUsage {
-            memory_bytes: Some(3 * 1024 * 1024 * 1024),
-            ..Default::default()
-        };
-        assert_eq!(cache_status(Some(memory_only), 0).unwrap(), "3.0 GB");
+        assert_eq!(cache_status(None, Some(3 * 1024 * 1024 * 1024), 0).unwrap(), "3.0 GB");
     }
 
     #[test]

@@ -1040,10 +1040,6 @@ pub struct ContextUsage {
     pub five_hour: Option<RateWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<RateWindow>,
-    /// Resident memory of the chat's agent process tree, sampled while it
-    /// runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_bytes: Option<u64>,
 }
 
 /// One turn's prompt-cache accounting.

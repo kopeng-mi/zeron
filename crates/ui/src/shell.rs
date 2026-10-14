@@ -2004,6 +2004,8 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Subagent chats already seen; a new one opens in a side tab.
+    pub(super) known_subagents: Option<std::collections::HashSet<String>>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2578,6 +2580,7 @@ impl Shell {
             sessions_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            known_subagents: None,
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -2849,6 +2852,7 @@ impl Shell {
             self.voice.update(cx, |voice, cx| voice.cancel(cx));
         }
         self.prune_file_explorers(cx);
+        self.open_new_subagents(cx);
         self.refresh_harness_update_watch(cx);
         self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
@@ -4375,26 +4379,7 @@ impl Shell {
                     cx.notify();
                 }
             }
-            // A subagent opens beside its orchestrator; any other chat opens
-            // as the main chat.
-            TranscriptEvent::OpenChat { chat_id } => {
-                let parent = self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .find(|chat| &chat.id == chat_id)
-                    .and_then(|chat| chat.parent_chat_id.clone());
-                match parent {
-                    Some(parent) => {
-                        if self.state.read(cx).selected_chat.as_deref() != Some(parent.as_str()) {
-                            self.open_chat(parent, cx);
-                        }
-                        self.open_child_chat_tab(chat_id, cx);
-                    }
-                    None => self.open_chat(chat_id.clone(), cx),
-                }
-            }
+            TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
         }
     }
 
@@ -8190,6 +8175,11 @@ impl Shell {
             }
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
+        // The agent's live memory, on regular rows (compact rows stay terse).
+        let memory: Option<SharedString> = (!compact && search_query.is_none())
+            .then(|| self.state.read(cx).agent_memory.get(&id).copied())
+            .flatten()
+            .map(|bytes| crate::account_usage::memory_label(bytes).into());
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         // Subagents running under this chat show as a "● N" pill beside the
@@ -8613,6 +8603,14 @@ impl Shell {
                                 .text_color(subline)
                                 .child(popover::search_highlight(space_name, search_query, theme)),
                         ))
+                        .children(memory.clone().map(|label| {
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(subline)
+                                .child(label)
+                        }))
                         .child(div().text_color(subline).children(corner.take())),
                 )
             })

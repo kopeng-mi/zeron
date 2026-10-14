@@ -223,6 +223,8 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    /// Resident bytes of each chat's live agent process tree on this host.
+    resources_tx: watch::Sender<std::collections::BTreeMap<String, u64>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -272,6 +274,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let (resources_tx, _) = watch::channel(std::collections::BTreeMap::new());
         Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -286,6 +289,7 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                resources_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -312,8 +316,9 @@ impl SessionsEngine {
         }
     }
 
-    /// Every 15 s, measure the agent process tree of each running chat and
-    /// record it for the status line. Stops when the engine is dropped.
+    /// Every 5 s, measure the agent process tree of each chat this engine
+    /// has run, idle ones too (the agent outlives its turn), and publish the
+    /// map. A chat whose agent has exited drops out. Stops with the engine.
     fn start_memory_sampler(&self) {
         static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -326,33 +331,32 @@ impl SessionsEngine {
         runtime.spawn(async move {
             let system = Arc::new(std::sync::Mutex::new(sysinfo::System::new()));
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 let Some(inner) = weak.upgrade() else { break };
-                let running: Vec<String> = lock(&inner.statuses)
-                    .iter()
-                    .filter(|(_, session)| is_active(session))
-                    .map(|(chat, _)| chat.clone())
-                    .collect();
-                let host = lock(&inner.doc_host).clone();
+                let chats: Vec<String> = lock(&inner.statuses).keys().cloned().collect();
                 drop(inner);
-                if running.is_empty() {
-                    continue;
-                }
                 let system = system.clone();
                 let sampled = tokio::task::spawn_blocking(move || {
                     let mut system = system.lock().unwrap_or_else(PoisonError::into_inner);
-                    crate::agent_memory::sample(&mut system, &running)
+                    crate::agent_memory::sample(&mut system, &chats)
                 })
                 .await
                 .unwrap_or_default();
-                let Some(host) = host else { continue };
-                for (chat, bytes) in sampled {
-                    if let Ok(handle) = host.open(&chat) {
-                        if let Err(err) = handle.doc().update_memory(bytes) {
-                            tracing::debug!(%chat, error = %err, "memory sample not recorded");
-                        }
+                let Some(inner) = weak.upgrade() else { break };
+                let sampled: std::collections::BTreeMap<String, u64> = sampled.into_iter().collect();
+                // Small swings (under 2%) don't wake every viewer.
+                inner.resources_tx.send_if_modified(|current| {
+                    let changed = current.len() != sampled.len()
+                        || sampled.iter().any(|(chat, bytes)| {
+                            current
+                                .get(chat)
+                                .is_none_or(|old| old.abs_diff(*bytes) * 50 >= (*old).max(1))
+                        });
+                    if changed {
+                        *current = sampled;
                     }
-                }
+                    changed
+                });
             }
         });
     }
@@ -414,6 +418,11 @@ impl SessionsEngine {
     }
 
     /// Status watch: the full session list, re-sent on every transition.
+    /// Memory of each chat's live agent on this host (`WatchAgentResources`).
+    pub fn watch_resources(&self) -> watch::Receiver<std::collections::BTreeMap<String, u64>> {
+        self.inner.resources_tx.subscribe()
+    }
+
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner.sessions_tx.subscribe()
     }

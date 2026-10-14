@@ -126,6 +126,43 @@ impl Shell {
         self.open_side_chat_tab(chat, key, true, cx);
     }
 
+    /// A subagent the open chat just spawned opens in a new side tab. Chats
+    /// already known when the window first saw the list never pop open.
+    pub(super) fn open_new_subagents(&mut self, cx: &mut Context<Self>) {
+        let (selected, children): (Option<String>, Vec<String>) = {
+            let state = self.state.read(cx);
+            (
+                state.selected_chat.clone(),
+                state
+                    .chats
+                    .iter()
+                    .filter(|c| c.parent_chat_id.is_some() && !c.archived)
+                    .map(|c| c.id.clone())
+                    .collect(),
+            )
+        };
+        let Some(known) = self.known_subagents.as_mut() else {
+            self.known_subagents = Some(children.into_iter().collect());
+            return;
+        };
+        let fresh: Vec<String> = children
+            .into_iter()
+            .filter(|id| known.insert(id.clone()))
+            .collect();
+        for id in fresh {
+            let spawned_here = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == id)
+                .is_some_and(|c| c.parent_chat_id == selected);
+            if spawned_here {
+                self.open_child_chat_tab(&id, cx);
+            }
+        }
+    }
+
     /// Open an existing side chat (a footer row) in the right pane.
     pub(super) fn open_child_chat_tab(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(chat) = self

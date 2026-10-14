@@ -114,6 +114,9 @@ pub mod methods {
     pub const DELIVER_AGENT_REPLY: &str = "DeliverAgentReply";
     /// Stop waiting. `{ chatId }` → `{ text | null }` (a reply that landed late).
     pub const CANCEL_AGENT_REPLY: &str = "CancelAgentReply";
+    /// Stream of `{chatId: residentBytes}` for every chat with a live agent
+    /// process on this engine, sampled every few seconds.
+    pub const WATCH_AGENT_RESOURCES: &str = "WatchAgentResources";
     /// Retype a queued message; empty text deletes it.
     /// `{ chatId, id, text }` → `{ changed }`.
     pub const UPDATE_QUEUED_MESSAGE: &str = "UpdateQueuedMessage";

@@ -6437,20 +6437,11 @@ impl Transcript {
         ))
     }
 
-    /// The inside of a user bubble: the prompt text, clipped to
-    /// [`USER_COLLAPSED_LINES`] until expanded, plus the expander chevron for
-    /// prompts past the cap. Returns the bubble's children in order.
-    ///
-    /// The collapsed form clips a normally-laid-out text element at exactly
-    /// five line boxes. Do not use gpui's `line_clamp` here: on an auto-width
-    /// flex item it answers intrinsic-width probes with the truncated layout,
-    /// collapsing the bubble to min-content width (one character per line).
-    /// A plain height clip preserves the original bubble width calculation and
-    /// never feeds measured layout back into the virtualized list.
-    /// Chat-to-chat messages as cards: a left accent bar in the kind's
-    /// color, the sender's harness and name, which way the message went,
-    /// the body, and a link to the sender. New cards rise in like the rest
-    /// of the transcript; history renders still.
+    /// Chat-to-chat messages, drawn on the user side like a prompt (they are
+    /// this agent's input): the user bubble, with a sender line above it —
+    /// the sender's harness, its name (opens it), and a small colored label
+    /// for what happened. New ones fade in like the rest of the transcript;
+    /// history renders still.
     fn render_agent_cards(
         &mut self,
         row_id: &SharedString,
@@ -6467,12 +6458,12 @@ impl Transcript {
             .iter()
             .enumerate()
             .map(|(ix, card)| {
-                let (accent, label, direction) = match card.kind {
-                    CardKind::Message => (theme.accent, "Message", "to this chat"),
-                    CardKind::FromSubagent => (theme.accent, "From subagent", "to its orchestrator"),
-                    CardKind::Update => (theme.success, "Done", "finished its turn"),
-                    CardKind::Question => (theme.warning, "Question", "needs an answer"),
-                    CardKind::Error => (theme.danger, "Error", "stopped with an error"),
+                let (accent, label) = match card.kind {
+                    CardKind::Message => (theme.text_muted, "Message"),
+                    CardKind::FromSubagent => (theme.text_muted, "From subagent"),
+                    CardKind::Update => (theme.success, "Done"),
+                    CardKind::Question => (theme.warning, "Question"),
+                    CardKind::Error => (theme.danger, "Error"),
                 };
                 let harness = card
                     .chat_id
@@ -6480,16 +6471,26 @@ impl Transcript {
                     .and_then(|id| chats.iter().find(|c| c.id == id))
                     .and_then(|c| c.config.as_ref().map(|config| config.harness));
                 let open = card.chat_id.clone().filter(|id| chats.iter().any(|c| &c.id == id));
-                let header = div()
+                let note = |text: &'static str, color: gpui::Hsla| {
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(color)
+                        .child(text)
+                };
+                let sender = div()
+                    .id(SharedString::from(format!("{row_id}-agent-sender-{ix}")))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(5.0))
                     .min_w_0()
+                    .px(px(4.0))
+                    .rounded(px(5.0))
                     .when_some(harness.map(crate::pickers::harness_brand_icon), |el, (path, tint)| {
                         el.child(
                             crate::icons::icon(path)
-                                .size(px(13.0))
+                                .size(px(12.0))
                                 .flex_none()
                                 .text_color(tint.unwrap_or(theme.text_muted)),
                         )
@@ -6498,103 +6499,68 @@ impl Transcript {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
                             .child(SharedString::from(card.sender.clone())),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(direction),
-                    )
-                    .child(div().flex_1())
-                    .when(card.steered, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child("steered in"),
-                        )
-                    })
-                    .when(card.waiting, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.warning)
-                                .child("Waiting on you"),
-                        )
-                    })
+                    .when_some(open, |el, chat_id| {
+                        el.cursor_pointer()
+                            .hover(|el| el.bg(theme.glass_hover()))
+                            .tooltip(crate::settings::widgets::text_tooltip_above("Open chat"))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(TranscriptEvent::OpenChat {
+                                    chat_id: chat_id.clone(),
+                                });
+                            }))
+                    });
+                let header = div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pb(px(4.0))
+                    .when(card.steered, |el| el.child(note("steered in", theme.text_muted.opacity(0.6))))
+                    .when(card.waiting, |el| el.child(note("waiting on you", theme.warning)))
+                    .child(sender)
                     .child(
                         div()
                             .flex_none()
                             .px(px(6.0))
-                            .h(px(18.0))
+                            .h(px(17.0))
                             .flex()
                             .items_center()
                             .rounded(px(5.0))
                             .bg(accent.opacity(0.14))
-                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_size(crate::typography::ui_rems(10.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(accent)
                             .child(label),
                     );
-                let body = (!card.body.is_empty()).then(|| {
-                    div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                        .text_color(theme.text.opacity(0.9))
-                        .child(SharedString::from(card.body.clone()))
-                });
-                let link = open.map(|chat_id| {
-                    div()
-                        .id(SharedString::from(format!("{row_id}-agent-open-{ix}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .hover(|el| el.text_color(theme.text))
-                        .child("Open chat")
-                        .child(crate::icons::icon(crate::icons::ARROW_UP_RIGHT).size(px(11.0)))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenChat {
-                                chat_id: chat_id.clone(),
-                            });
-                        }))
+                let bubble = (!card.body.is_empty()).then(|| {
+                    div().w_full().flex().justify_end().child(
+                        div()
+                            .min_w_0()
+                            .max_w(px(width))
+                            .bg(crate::theme::user_bubble_bg())
+                            .rounded(px(Theme::BUBBLE_RADIUS))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                            .text_color(theme.text)
+                            .child(SharedString::from(card.body.clone())),
+                    )
                 });
                 let card_el = div()
                     .id(SharedString::from(format!("{row_id}-agent-{ix}")))
                     .w_full()
-                    .max_w(px(width))
                     .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .rounded(px(Theme::BUBBLE_RADIUS))
-                    .bg(crate::theme::wash(0.035))
-                    .border_1()
-                    .border_color(crate::theme::wash(0.06))
-                    .child(div().w(px(3.0)).flex_none().bg(accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .px(px(14.0))
-                            .py(px(10.0))
-                            .child(header)
-                            .children(body)
-                            .children(link),
-                    );
+                    .flex_col()
+                    .child(header)
+                    .children(bubble);
                 if animate {
                     motion::fade_in(
                         SharedString::from(format!("{row_id}-agent-in-{ix}")),
@@ -6610,11 +6576,21 @@ impl Transcript {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .children(rendered)
             .into_any_element()
     }
 
+    /// The inside of a user bubble: the prompt text, clipped to
+    /// [`USER_COLLAPSED_LINES`] until expanded, plus the expander chevron for
+    /// prompts past the cap. Returns the bubble's children in order.
+    ///
+    /// The collapsed form clips a normally-laid-out text element at exactly
+    /// five line boxes. Do not use gpui's `line_clamp` here: on an auto-width
+    /// flex item it answers intrinsic-width probes with the truncated layout,
+    /// collapsing the bubble to min-content width (one character per line).
+    /// A plain height clip preserves the original bubble width calculation and
+    /// never feeds measured layout back into the virtualized list.
     fn render_user_body(
         &mut self,
         row_id: &SharedString,

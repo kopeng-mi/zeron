@@ -217,6 +217,22 @@ impl Shell {
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
+        // A subagent opens as a side tab beside its orchestrator, from the
+        // sidebar tree, an agent card, search or a link alike.
+        let parent = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.parent_chat_id.clone());
+        if let Some(parent) = parent {
+            if self.state.read(cx).selected_chat.as_deref() != Some(parent.as_str()) {
+                self.open_chat(parent, cx);
+            }
+            self.open_child_chat_tab(&chat_id, cx);
+            return;
+        }
         // Opening any session steps the voice stage aside — including the one
         // already selected under it. The call keeps running in the background.
         self.set_voice_stage_open(false, cx);

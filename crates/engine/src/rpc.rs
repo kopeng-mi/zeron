@@ -2644,6 +2644,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
+            methods::WATCH_AGENT_RESOURCES => Ok(RpcReply::Stream(watch_stream(
+                self.sessions.watch_resources(),
+            ))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

@@ -817,6 +817,9 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// Resident bytes of each chat's live agent on this device's engine
+    /// (`WatchAgentResources`), for the status line and sidebar rows.
+    pub agent_memory: std::collections::BTreeMap<String, u64>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -949,6 +952,7 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            agent_memory: Default::default(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1354,6 +1358,15 @@ impl AppState {
 
     /// Returns whether the posture changed. The first frame after attach always
     /// counts: it ends the bootstrap gap the shell's alert baseline waits on.
+    pub fn apply_agent_resources(
+        &mut self,
+        memory: std::collections::BTreeMap<String, u64>,
+    ) -> bool {
+        let changed = self.agent_memory != memory;
+        self.agent_memory = memory;
+        changed
+    }
+
     pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) -> bool {
         let changed = !self.connectivity_observed || self.connectivity != connectivity;
         self.connectivity = connectivity;
@@ -2609,6 +2622,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_CONNECTIVITY,
                 AppState::apply_connectivity,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_AGENT_RESOURCES,
+                AppState::apply_agent_resources,
             ),
             spawn_watch(
                 cx,
