@@ -224,7 +224,7 @@ impl ExplorerSections {
 
 /// A spawn chip of the active transcript, as the footer lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SubagentRow {
+pub(crate) struct SubagentRow {
     pub doc_id: String,
     pub title: SharedString,
     pub status: Option<SubagentStatus>,
@@ -258,7 +258,7 @@ impl SubagentRow {
 /// Only genuine spawn chips with a stamped doc ref qualify — the chip IS the
 /// index (there is no listing endpoint), and a stray ref on a non-Agent tool
 /// must not surface as a phantom subagent.
-pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow> {
+pub(crate) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow> {
     if state.selected_chat.as_deref() != Some(chat_id) {
         return Vec::new();
     }
@@ -312,7 +312,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
 
 /// A side chat of the active chat, as the footer lists it.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ChildChatRow {
+pub(crate) struct ChildChatRow {
     pub chat_id: String,
     pub device_id: String,
     pub title: SharedString,
@@ -323,9 +323,24 @@ pub(super) struct ChildChatRow {
     activity: DateTime<Utc>,
 }
 
+#[cfg(test)]
+impl ChildChatRow {
+    pub(crate) fn for_test(chat_id: &str, status: ChatIndicator) -> Self {
+        Self {
+            chat_id: chat_id.into(),
+            device_id: "d".into(),
+            title: chat_id.to_owned().into(),
+            status,
+            time_ago: "now".into(),
+            change_request: None,
+            activity: Utc::now(),
+        }
+    }
+}
+
 /// The live (unarchived) children of `chat_id`, most recent activity first —
 /// the same order the sidebar's Sessions list keeps.
-pub(super) fn child_chat_rows(
+pub(crate) fn child_chat_rows(
     state: &AppState,
     chat_id: &str,
     now: DateTime<Utc>,

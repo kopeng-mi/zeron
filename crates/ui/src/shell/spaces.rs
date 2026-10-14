@@ -5079,6 +5079,7 @@ impl Shell {
             .len();
         let regular_rows = rows.split_off(pinned_count);
         let pinned_rows = rows;
+        let tree_parents = self.sidebar_tree_parents(cx);
         self.sidebar_pinned_heights = pinned_rows
             .iter()
             .map(|row| {
@@ -5087,7 +5088,9 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
-                )
+                ) + self
+                    .sidebar_tree_plan(&row.chat.id, &tree_parents, cx)
+                    .map_or(0.0, |tree| tree.height())
             })
             .collect();
         let visible_pinned_ids = std::sync::Arc::new(
@@ -5346,6 +5349,9 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
+                let tree = self.sidebar_tree_plan(&chat.id, &tree_parents, cx);
+                let tree_height = tree.as_ref().map_or(0.0, |tree| tree.height());
+                let tree = tree.map(|tree| self.render_sidebar_tree(&chat.id, tree, theme, cx));
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
@@ -5430,7 +5436,23 @@ impl Shell {
                         },
                     ))
                     .into_any_element();
-                rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
+                // The tree rides in the row's slot, so pins, sections and the
+                // list's height math carry it with its parent.
+                let element = match tree {
+                    Some(tree) => div()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .child(element)
+                        .child(tree)
+                        .into_any_element(),
+                    None => element,
+                };
+                rendered_rows.push((
+                    format!("c:{}", chat.id),
+                    slot_height + tree_height,
+                    element,
+                ));
             }
 
             let Some((key, label)) = group else {
