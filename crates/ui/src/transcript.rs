@@ -1075,6 +1075,9 @@ pub enum RowKind {
         badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// Chat-to-chat traffic (a message from another chat, a subagent,
+        /// or a notice): drawn as agent cards instead of a user bubble.
+        agent: Option<Arc<Vec<zeron_proto::agent_messages::AgentCard>>>,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1371,6 +1374,7 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
+        let agent = zeron_proto::agent_messages::cards(&body).map(Arc::new);
         let body = agent_message_display(&body);
         // Chips stand in for their attachments: those leave the strip, and a
         // chip carries its upload's path for its progress and, for an image,
@@ -1410,6 +1414,7 @@ pub fn rows_for_entry(
                 attachments: Arc::new(attachments),
                 badges: Arc::new(badges),
                 pending,
+                agent,
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -3556,6 +3561,8 @@ pub enum TranscriptEvent {
     },
     /// A user message's Edit action: put that prompt back in the composer.
     EditPrompt { entry_id: String },
+    /// An agent card's "Open chat": the chat that sent it.
+    OpenChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6426,6 +6433,165 @@ impl Transcript {
     /// collapsing the bubble to min-content width (one character per line).
     /// A plain height clip preserves the original bubble width calculation and
     /// never feeds measured layout back into the virtualized list.
+    /// Chat-to-chat messages as cards: a left accent bar in the kind's
+    /// color, the sender's harness and name, which way the message went,
+    /// the body, and a link to the sender. New cards rise in like the rest
+    /// of the transcript; history renders still.
+    fn render_agent_cards(
+        &mut self,
+        row_id: &SharedString,
+        cards: Arc<Vec<zeron_proto::agent_messages::AgentCard>>,
+        fresh: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::agent_messages::CardKind;
+        let animate = fresh && !motion::reduced_motion(cx);
+        let width = self.content_width * 0.8;
+        let chats = &self.state.read(cx).chats;
+        let rendered: Vec<AnyElement> = cards
+            .iter()
+            .enumerate()
+            .map(|(ix, card)| {
+                let (accent, label, direction) = match card.kind {
+                    CardKind::Message => (theme.accent, "Message", "to this chat"),
+                    CardKind::FromSubagent => (theme.accent, "From subagent", "to its orchestrator"),
+                    CardKind::Update => (theme.success, "Done", "finished its turn"),
+                    CardKind::Question => (theme.warning, "Question", "needs an answer"),
+                    CardKind::Error => (theme.danger, "Error", "stopped with an error"),
+                };
+                let harness = card
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| chats.iter().find(|c| c.id == id))
+                    .and_then(|c| c.config.as_ref().map(|config| config.harness));
+                let open = card.chat_id.clone().filter(|id| chats.iter().any(|c| &c.id == id));
+                let header = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_w_0()
+                    .when_some(harness.map(crate::pickers::harness_brand_icon), |el, (path, tint)| {
+                        el.child(
+                            crate::icons::icon(path)
+                                .size(px(13.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(theme.text_muted)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(SharedString::from(card.sender.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(direction),
+                    )
+                    .child(div().flex_1())
+                    .when(card.waiting, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.warning)
+                                .child("Waiting on you"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.0))
+                            .bg(accent.opacity(0.14))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(accent)
+                            .child(label),
+                    );
+                let body = (!card.body.is_empty()).then(|| {
+                    div()
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                        .text_color(theme.text.opacity(0.9))
+                        .child(SharedString::from(card.body.clone()))
+                });
+                let link = open.map(|chat_id| {
+                    div()
+                        .id(SharedString::from(format!("{row_id}-agent-open-{ix}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .cursor_pointer()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .hover(|el| el.text_color(theme.text))
+                        .child("Open chat")
+                        .child(crate::icons::icon(crate::icons::ARROW_UP_RIGHT).size(px(11.0)))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::OpenChat {
+                                chat_id: chat_id.clone(),
+                            });
+                        }))
+                });
+                let card_el = div()
+                    .id(SharedString::from(format!("{row_id}-agent-{ix}")))
+                    .w_full()
+                    .max_w(px(width))
+                    .flex()
+                    .flex_row()
+                    .overflow_hidden()
+                    .rounded(px(Theme::BUBBLE_RADIUS))
+                    .bg(crate::theme::wash(0.035))
+                    .border_1()
+                    .border_color(crate::theme::wash(0.06))
+                    .child(div().w(px(3.0)).flex_none().bg(accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .px(px(14.0))
+                            .py(px(10.0))
+                            .child(header)
+                            .children(body)
+                            .children(link),
+                    );
+                if animate {
+                    motion::fade_in(
+                        SharedString::from(format!("{row_id}-agent-in-{ix}")),
+                        card_el,
+                    )
+                    .into_any_element()
+                } else {
+                    card_el.into_any_element()
+                }
+            })
+            .collect();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(rendered)
+            .into_any_element()
+    }
+
     fn render_user_body(
         &mut self,
         row_id: &SharedString,
@@ -7421,12 +7587,19 @@ impl Transcript {
             .flatten();
 
         let inner: AnyElement = match &row.kind {
+            RowKind::User { agent: Some(cards), .. } => {
+                let fresh = row.timestamp.is_some_and(|at| {
+                    chrono::Utc::now().timestamp_millis() - at < 10_000
+                });
+                self.render_agent_cards(&row.id, cards.clone(), fresh, &theme, cx)
+            }
             RowKind::User {
                 text,
                 mentions,
                 attachments,
                 badges,
                 pending,
+                ..
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();

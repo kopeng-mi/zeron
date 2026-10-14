@@ -1246,8 +1246,9 @@ impl Tools {
             "Reply with send_message only if it needs an answer."
         };
         let body = format!(
-            "{}{label}, id {me}, your subagent. {ask}]\n\n{text}",
-            zeron_proto::agent_messages::MESSAGE_PREFIX
+            "{}{label}, id {me}. {} {ask}]\n\n{text}",
+            zeron_proto::agent_messages::MESSAGE_PREFIX,
+            zeron_proto::agent_messages::FROM_SUBAGENT
         );
         let parent_chat = self.zeron.resolve_chat(parent).await?;
         let delivery = self

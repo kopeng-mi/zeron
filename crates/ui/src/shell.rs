@@ -4375,6 +4375,26 @@ impl Shell {
                     cx.notify();
                 }
             }
+            // A subagent opens beside its orchestrator; any other chat opens
+            // as the main chat.
+            TranscriptEvent::OpenChat { chat_id } => {
+                let parent = self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == chat_id)
+                    .and_then(|chat| chat.parent_chat_id.clone());
+                match parent {
+                    Some(parent) => {
+                        if self.state.read(cx).selected_chat.as_deref() != Some(parent.as_str()) {
+                            self.open_chat(parent, cx);
+                        }
+                        self.open_child_chat_tab(chat_id, cx);
+                    }
+                    None => self.open_chat(chat_id.clone(), cx),
+                }
+            }
         }
     }
 

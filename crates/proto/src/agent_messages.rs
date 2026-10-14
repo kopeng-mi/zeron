@@ -129,6 +129,95 @@ fn notice_header_display(line: &str) -> Option<String> {
     Some(format!("{lead}{}", event.name))
 }
 
+/// Marks a message a subagent sent its parent: `…, id {id}. From your
+/// subagent. {routing}]`.
+pub const FROM_SUBAGENT: &str = "From your subagent.";
+
+/// What an agent card says about its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardKind {
+    /// Another chat (an orchestrator) messaged this one.
+    Message,
+    /// This chat's subagent messaged it.
+    FromSubagent,
+    /// A child finished its turn.
+    Update,
+    /// A child is blocked on a question.
+    Question,
+    /// A child's turn failed.
+    Error,
+}
+
+/// One chat-to-chat message as the transcript draws it: who, what kind, and
+/// the body people read (routing instructions stripped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCard {
+    pub kind: CardKind,
+    /// The sender's title, else its short id.
+    pub sender: String,
+    /// The sender's full chat id when the header carries one.
+    pub chat_id: Option<String>,
+    pub body: String,
+    /// The sender is blocked until this chat replies.
+    pub waiting: bool,
+}
+
+/// In a subagent's header: it is blocked in `send_message { wait: true }`.
+pub const BLOCKED_WAITING: &str = "It is blocked waiting on your answer";
+
+/// The cards in `text`, or `None` when it is not chat-to-chat traffic. A
+/// notice yields one card per reporting chat.
+pub fn cards(text: &str) -> Option<Vec<AgentCard>> {
+    if text.starts_with(NOTICE_PREFIX) {
+        let text = text.strip_suffix(NOTICE_FOOTER).unwrap_or(text).trim_end();
+        let mut cards: Vec<AgentCard> = Vec::new();
+        for line in text.split('\n') {
+            if let Some(event) = notice_event(line) {
+                cards.push(AgentCard {
+                    kind: match event.kind {
+                        NoticeKind::Finished => CardKind::Update,
+                        NoticeKind::Question => CardKind::Question,
+                        NoticeKind::Error => CardKind::Error,
+                    },
+                    sender: event.name,
+                    chat_id: Some(event.chat_id),
+                    body: String::new(),
+                    waiting: false,
+                });
+            } else if let Some(card) = cards.last_mut() {
+                card.body.push_str(line);
+                card.body.push('\n');
+            }
+        }
+        for card in &mut cards {
+            card.body = card.body.trim().to_owned();
+        }
+        return (!cards.is_empty()).then_some(cards);
+    }
+    let rest = text.strip_prefix(MESSAGE_PREFIX)?;
+    let (header, body) = rest.split_once("]\n\n")?;
+    let display = message_display(text)?;
+    let sender = display
+        .strip_prefix("Message from ")?
+        .split_once("\n\n")
+        .map_or("", |(name, _)| name)
+        .to_owned();
+    let chat_id = header
+        .split_once(", id ")
+        .map(|(_, tail)| tail.split_once(". ").map_or(tail, |(id, _)| id).to_owned());
+    Some(vec![AgentCard {
+        kind: if header.contains(FROM_SUBAGENT) {
+            CardKind::FromSubagent
+        } else {
+            CardKind::Message
+        },
+        sender,
+        chat_id,
+        body: body.trim().to_owned(),
+        waiting: header.contains(BLOCKED_WAITING),
+    }])
+}
+
 /// What a notice section reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
@@ -249,6 +338,37 @@ mod tests {
             ]
         );
         assert_eq!(notice_events("hello"), None);
+    }
+
+    #[test]
+    fn cards_split_messages_and_notices_by_sender() {
+        let from_child = "[Message from Zeron chat Worker (0f3a9c21), id 0f3a9c21-aaaa. From your subagent. Reply with send_message only if it needs an answer.]\n\nfound it";
+        let card = &cards(from_child).unwrap()[0];
+        assert_eq!(card.kind, CardKind::FromSubagent);
+        assert_eq!(card.sender, "Worker");
+        assert_eq!(card.chat_id.as_deref(), Some("0f3a9c21-aaaa"));
+        assert_eq!(card.body, "found it");
+        assert!(!card.waiting);
+        let blocked = from_child.replace(
+            "Reply with send_message only if it needs an answer.",
+            "It is blocked waiting on your answer: send_message it.",
+        );
+        assert!(cards(&blocked).unwrap()[0].waiting);
+        assert_eq!(
+            display(from_child).unwrap(),
+            "Message from Worker\n\nfound it"
+        );
+
+        let notice = format!(
+            "{NOTICE_PREFIX}{} finished its turn.]\n\nAll green.\n\n{NOTICE_PREFIX}{} stopped with an error.]\n\nboom\n\n{NOTICE_FOOTER}",
+            notice_label(Some("Tests"), "child-a"),
+            notice_label(Some("Docs"), "child-b"),
+        );
+        let shown = cards(&notice).unwrap();
+        assert_eq!(shown.len(), 2);
+        assert_eq!((shown[0].kind, shown[0].body.as_str()), (CardKind::Update, "All green."));
+        assert_eq!((shown[1].kind, shown[1].sender.as_str()), (CardKind::Error, "Docs"));
+        assert_eq!(cards("plain"), None);
     }
 
     #[test]

@@ -408,6 +408,22 @@ impl Shell {
                 None => (SharedString::from(""), None, true),
             }
         };
+        // A subagent names the chat that spawned it, one click back.
+        let parent: Option<(String, SharedString)> = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat_row()
+                .and_then(|chat| chat.parent_chat_id.clone())
+                .map(|id| {
+                    let title = state
+                        .chats
+                        .iter()
+                        .find(|c| c.id == id)
+                        .and_then(|c| c.title.clone())
+                        .unwrap_or_else(|| id.chars().take(8).collect());
+                    (id, SharedString::from(transcript::single_line(&title)))
+                })
+        };
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
@@ -647,7 +663,39 @@ impl Shell {
                                     theme.text.opacity(0.85)
                                 })
                                 .child(title),
-                        ),
+                        )
+                        .when_some(parent, |el, (parent_id, parent_title)| {
+                            el.child(
+                                div()
+                                    .id("titlebar-spawned-by")
+                                    .flex_none()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .px(px(6.0))
+                                    .h(px(20.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted.opacity(0.75))
+                                    .hover(|el| el.bg(theme.glass_hover()).text_color(theme.text))
+                                    .child("subagent of")
+                                    .child(
+                                        div()
+                                            .max_w(px(180.0))
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .child(parent_title),
+                                    )
+                                    .tooltip(crate::settings::widgets::text_tooltip_above(
+                                        "Open the orchestrator",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_chat(parent_id.clone(), cx);
+                                    })),
+                            )
+                        }),
                 )
             })
             .child(div().flex_1())
