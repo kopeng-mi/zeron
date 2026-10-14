@@ -29,6 +29,7 @@ pub mod thread_naming;
 pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;
+mod worktrees;
 
 /// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
 /// button inside the sidebar beside the titlebar controls: 88 (past the
@@ -47,6 +48,9 @@ pub const FILES_PANEL_MAX: f32 = 440.0;
 /// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
+/// The Pull requests route's side pane defaults wider than the chat's: the
+/// detail's Code tab needs room beside the board.
+pub const PULL_REQUEST_PANE_DEFAULT: f32 = 640.0;
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
 
@@ -902,6 +906,8 @@ pub struct UiSettings {
     /// remain enabled independently of this preference.
     pub agent_update_notifications: bool,
     pub right_pane_width: f32,
+    /// Width of the pull request pane beside the board.
+    pub pull_request_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
@@ -1052,6 +1058,7 @@ impl Default for UiSettings {
             files_panel_width: FILES_PANEL_DEFAULT,
             agent_update_notifications: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
+            pull_request_pane_width: PULL_REQUEST_PANE_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
@@ -1703,6 +1710,7 @@ impl UiSettings {
             files_panel_width,
             agent_update_notifications,
             right_pane_width,
+            pull_request_pane_width,
             right_pane_open,
             terminal_height,
             terminal_open,
@@ -1776,6 +1784,11 @@ impl UiSettings {
             FILES_PANEL_DEFAULT,
         );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
+        self.pull_request_pane_width = min_or(
+            self.pull_request_pane_width,
+            RIGHT_PANE_MIN,
+            PULL_REQUEST_PANE_DEFAULT,
+        );
         self.terminal_height = clamp_or(
             self.terminal_height,
             TERMINAL_MIN_HEIGHT,
@@ -2745,6 +2758,7 @@ mod tests {
             files_panel_width: 310.0,
             agent_update_notifications: false,
             right_pane_width: 700.0,
+            pull_request_pane_width: 820.0,
             right_pane_open: true,
             terminal_height: 320.0,
             terminal_open: true,
