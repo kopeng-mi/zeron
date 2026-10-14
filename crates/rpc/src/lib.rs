@@ -105,6 +105,15 @@ pub mod methods {
     pub const CANCEL_TURN_NOTICE: &str = "CancelTurnNotice";
     /// Pending turn notices. `{ watcherChatId? }` → `{ watches: [...] }`.
     pub const LIST_TURN_NOTICES: &str = "ListTurnNotices";
+    /// A subagent blocked on its orchestrator: mark `chatId` waiting and
+    /// long-poll for a reply. `{ chatId, waitMs }` → `{ text | null }`.
+    /// The chat's host only.
+    pub const AWAIT_AGENT_REPLY: &str = "AwaitAgentReply";
+    /// Hand a waiting subagent its reply. `{ chatId, text }` →
+    /// `{ delivered }`; `false` means send it the ordinary way.
+    pub const DELIVER_AGENT_REPLY: &str = "DeliverAgentReply";
+    /// Stop waiting. `{ chatId }` → `{ text | null }` (a reply that landed late).
+    pub const CANCEL_AGENT_REPLY: &str = "CancelAgentReply";
     /// Retype a queued message; empty text deletes it.
     /// `{ chatId, id, text }` → `{ changed }`.
     pub const UPDATE_QUEUED_MESSAGE: &str = "UpdateQueuedMessage";

@@ -730,6 +730,7 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     turn_notices: Option<zeron_mcp::TurnNotices>,
+    agent_replies: crate::agent_replies::AgentReplies,
     engine_info: EngineInfo,
 }
 
@@ -778,6 +779,7 @@ impl EngineRpc {
             updater: None,
             harness_updates: None,
             turn_notices: None,
+            agent_replies: Default::default(),
             local_import: None,
             engine_info,
         }
@@ -1546,6 +1548,8 @@ fn forwardable(method: &str) -> bool {
             | methods::REMOVE_ACP_AGENT
             | methods::SET_ACP_AGENT_ENV
             | methods::SET_PI_COMMAND
+            | methods::DELIVER_AGENT_REPLY
+            | methods::DELIVER_EVENT
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
@@ -2336,6 +2340,30 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "delivery": delivery }))
+            }
+            methods::AWAIT_AGENT_REPLY => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    wait_ms: Option<u64>,
+                }
+                let p: Params = parse_params(params)?;
+                // Short polls: a unary call must answer well inside any
+                // client timeout; the subagent re-polls until its own limit.
+                let max = Duration::from_millis(p.wait_ms.unwrap_or(20_000).min(25_000));
+                let text = self.agent_replies.wait(&p.chat_id, max).await;
+                RpcReply::value(&serde_json::json!({ "text": text }))
+            }
+            methods::DELIVER_AGENT_REPLY => {
+                let p: DeliverEventParams = parse_params(params)?;
+                let delivered = self.agent_replies.deliver(&p.chat_id, &p.text);
+                RpcReply::value(&serde_json::json!({ "delivered": delivered }))
+            }
+            methods::CANCEL_AGENT_REPLY => {
+                let p: ChatParams = parse_params(params)?;
+                let text = self.agent_replies.cancel(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "text": text }))
             }
             methods::CANCEL_TURN_NOTICE => {
                 let p: TurnNoticeParams = parse_params(params)?;
