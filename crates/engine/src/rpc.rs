@@ -2352,7 +2352,13 @@ impl RpcService for EngineRpc {
                 // Short polls: a unary call must answer well inside any
                 // client timeout; the subagent re-polls until its own limit.
                 let max = Duration::from_millis(p.wait_ms.unwrap_or(20_000).min(25_000));
+                // Stays marked across re-polls; cleared when the reply lands
+                // or the wait is cancelled.
+                self.sessions.mark_waiting_on_parent(&p.chat_id, true);
                 let text = self.agent_replies.wait(&p.chat_id, max).await;
+                if text.is_some() {
+                    self.sessions.mark_waiting_on_parent(&p.chat_id, false);
+                }
                 RpcReply::value(&serde_json::json!({ "text": text }))
             }
             methods::DELIVER_AGENT_REPLY => {
@@ -2363,6 +2369,7 @@ impl RpcService for EngineRpc {
             methods::CANCEL_AGENT_REPLY => {
                 let p: ChatParams = parse_params(params)?;
                 let text = self.agent_replies.cancel(&p.chat_id);
+                self.sessions.mark_waiting_on_parent(&p.chat_id, false);
                 RpcReply::value(&serde_json::json!({ "text": text }))
             }
             methods::CANCEL_TURN_NOTICE => {

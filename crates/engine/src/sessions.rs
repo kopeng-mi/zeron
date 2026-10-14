@@ -391,6 +391,22 @@ impl SessionsEngine {
     /// question it is still owed an answer to (see [`is_active`]). A persistent
     /// session parked BETWEEN turns is not: it holds a warm child with nothing
     /// outstanding, and takes the next prompt straight through its mailbox.
+    /// A subagent blocked in `send_message { wait: true }` reads as awaiting
+    /// input (the sidebar's amber "Input", the parent's chat_status) while
+    /// its turn runs; `false` puts it back to working. Only a running turn
+    /// changes: an idle or errored row is left alone.
+    pub fn mark_waiting_on_parent(&self, chat_id: &str, waiting: bool) {
+        let current = lock(&self.inner.statuses)
+            .get(chat_id)
+            .map(|session| session.status);
+        let next = match (current, waiting) {
+            (Some(SessionStatus::Working), true) => SessionStatus::AwaitingInput,
+            (Some(SessionStatus::AwaitingInput), false) => SessionStatus::Working,
+            _ => return,
+        };
+        self.set_status(chat_id, next, false);
+    }
+
     pub fn turn_in_flight(&self, chat_id: &str) -> bool {
         lock(&self.inner.statuses)
             .get(chat_id)

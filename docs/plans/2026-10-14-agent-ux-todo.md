@@ -7,7 +7,7 @@ Open work from the agent-to-agent and status-line sessions, in order.
 - [x] **Steered-in marker.** A message steered into a running turn through
   the agent inbox (`DeliverEvent` → steer) leaves no transcript entry. Record
   a small system entry so the transcript shows `↳ Message from X steered in`.
-- [ ] **Waiting state on rows.** A subagent blocked in
+- [x] **Waiting state on rows.** A subagent blocked in
   `send_message { wait: true }` lives only in the engine's `AgentReplies`.
   Sync it (session field or doc flag) so its sidebar row and the parent's
   tree line show amber "waiting on you".
