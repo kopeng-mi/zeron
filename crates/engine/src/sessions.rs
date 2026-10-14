@@ -3135,6 +3135,30 @@ async fn drive_run(
             }
             continue;
         }
+        // The status line's cache and plan-limit numbers ride the same
+        // snapshot. The host stamps when the cache was written: its warmth
+        // counts down from here.
+        let stats = match &event {
+            AgentEvent::CacheStats { stats } => Some((
+                Some(zeron_proto::CacheStats {
+                    at_ms: chrono::Utc::now().timestamp_millis(),
+                    ..*stats
+                }),
+                None,
+                None,
+            )),
+            AgentEvent::RateLimits {
+                five_hour,
+                seven_day,
+            } => Some((None, *five_hour, *seven_day)),
+            _ => None,
+        };
+        if let Some((cache, five_hour, seven_day)) = stats {
+            if let Err(err) = doc_ref.update_turn_stats(cache, five_hour, seven_day) {
+                tracing::warn!(%chat_id, error = %err, "turn stats write failed");
+            }
+            continue;
+        }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
         // re-opens the session; everything else stays gated. The ACP child
         // keeps forwarding `session/update` frames after a turn completes,

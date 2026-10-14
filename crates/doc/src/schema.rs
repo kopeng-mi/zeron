@@ -359,7 +359,40 @@ impl SessionDoc {
         let next = zeron_proto::ContextUsage {
             tokens: tokens.or(previous.tokens),
             window: window.filter(|n| *n > 0).or(previous.window),
+            ..previous
         };
+        self.write_context_usage(previous, next)
+    }
+
+    /// Record the latest turn's cache accounting and/or the plan's rate
+    /// windows beside the context occupancy. A missing value keeps the stored one.
+    pub fn update_turn_stats(
+        &self,
+        cache: Option<zeron_proto::CacheStats>,
+        five_hour: Option<zeron_proto::RateWindow>,
+        seven_day: Option<zeron_proto::RateWindow>,
+    ) -> Result<(), DocError> {
+        let previous = self.context_usage().unwrap_or_default();
+        let next = zeron_proto::ContextUsage {
+            // A turn that only read the cache doesn't report its TTL.
+            cache: cache
+                .map(|c| zeron_proto::CacheStats {
+                    ttl_secs: c.ttl_secs.or(previous.cache.and_then(|p| p.ttl_secs)),
+                    ..c
+                })
+                .or(previous.cache),
+            five_hour: five_hour.or(previous.five_hour),
+            seven_day: seven_day.or(previous.seven_day),
+            ..previous
+        };
+        self.write_context_usage(previous, next)
+    }
+
+    fn write_context_usage(
+        &self,
+        previous: zeron_proto::ContextUsage,
+        next: zeron_proto::ContextUsage,
+    ) -> Result<(), DocError> {
         if next != previous {
             self.doc
                 .get_map("meta")
@@ -2237,9 +2270,16 @@ mod context_usage_tests {
             replica.context_usage(),
             Some(zeron_proto::ContextUsage {
                 tokens: Some(0),
-                window: Some(200_000)
+                window: Some(200_000),
+                ..Default::default()
             })
         );
+        let cache = zeron_proto::CacheStats { read: 9, write: 1, input: 0, ttl_secs: Some(3600), at_ms: 5 };
+        host.update_turn_stats(Some(cache), None, None).unwrap();
+        host.update_context_usage(Some(0), None).unwrap();
+        // Context updates keep the cache stats, and the reverse.
+        assert_eq!(host.context_usage().unwrap().cache, Some(cache));
+        assert_eq!(host.context_usage().unwrap().window, Some(200_000));
         host.update_context_usage(None, Some(1_000_000)).unwrap();
         assert_eq!(host.context_usage().unwrap().tokens, Some(0));
         let rebuilt = crate::rebuild_thin_doc(&host).unwrap().doc;

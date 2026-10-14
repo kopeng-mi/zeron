@@ -121,6 +121,7 @@ fn details(usage: Option<ContextUsage>) -> String {
         ContextUsage {
             tokens: Some(tokens),
             window: Some(window),
+            ..
         } if window > 0 => {
             format!(
                 "{} / {} tokens\n{} tokens remaining",
@@ -174,14 +175,17 @@ mod tests {
         assert!(!has_window(Some(ContextUsage {
             tokens: Some(1_200),
             window: None,
+            ..Default::default()
         })));
         assert!(!has_window(Some(ContextUsage {
             tokens: Some(1_200),
             window: Some(0),
+            ..Default::default()
         })));
         assert!(has_window(Some(ContextUsage {
             tokens: None,
             window: Some(200_000),
+            ..Default::default()
         })));
     }
 
@@ -191,21 +195,24 @@ mod tests {
         assert!(
             details(Some(ContextUsage {
                 tokens: Some(0),
-                window: Some(200)
+                window: Some(200),
+                ..Default::default()
             }))
             .contains("200 tokens remaining")
         );
         assert!(
             details(Some(ContextUsage {
                 tokens: Some(250),
-                window: Some(200)
+                window: Some(200),
+                ..Default::default()
             }))
             .contains("0 tokens remaining")
         );
         assert!(
             details(Some(ContextUsage {
                 tokens: Some(10),
-                window: Some(0)
+                window: Some(0),
+                ..Default::default()
             }))
             .contains("limit not reported")
         );
@@ -220,7 +227,8 @@ mod tests {
         assert_eq!(
             details(Some(ContextUsage {
                 tokens: Some(5417),
-                window: Some(1_048_576)
+                window: Some(1_048_576),
+                ..Default::default()
             })),
             "5,417 / 1,048,576 tokens\n1,043,159 tokens remaining"
         );

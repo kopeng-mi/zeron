@@ -2887,7 +2887,8 @@ async fn context_usage_settles_after_done_without_reopening_the_turn() {
         handle.doc().context_usage(),
         Some(zeron_proto::ContextUsage {
             tokens: Some(0),
-            window: Some(200000)
+            window: Some(200000),
+            ..Default::default()
         })
     );
     assert_eq!(

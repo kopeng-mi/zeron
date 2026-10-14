@@ -28,6 +28,59 @@ const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Background re-probe while a composer is alive: usage moves as turns run.
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How often the status line repaints its cache-warm countdown.
+const STATUS_TICK: Duration = Duration::from_secs(30);
+
+/// Overlay the plan windows Claude reported on its last turn onto the
+/// account's polled ones (`Session` = five-hour, `Week` = seven-day). Turns
+/// report them live, so the ring stops lagging the 5-minute poll. A window
+/// whose reset has passed is dropped as stale. Pure.
+pub fn with_live_windows(
+    mut account: AgentAccount,
+    live: Option<zeron_proto::ContextUsage>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentAccount {
+    let Some(live) = live else {
+        return account;
+    };
+    for (label, window) in [("Session", live.five_hour), ("Week", live.seven_day)] {
+        let Some(window) = window else { continue };
+        let resets_at = chrono::DateTime::from_timestamp(window.resets_at, 0);
+        if resets_at.is_some_and(|at| at <= now) {
+            continue;
+        }
+        let fresh = zeron_proto::AgentUsageWindow {
+            label: label.to_owned(),
+            used_fraction: f32::from(window.used_permille) / 1000.0,
+            resets_at,
+        };
+        match account.usage_windows.iter_mut().find(|w| w.label == label) {
+            Some(existing) => *existing = fresh,
+            None => account.usage_windows.push(fresh),
+        }
+    }
+    account
+}
+
+/// The status line's text: prompt-cache hit rate and how long the cache
+/// stays warm, e.g. `cache 91% · warm 58m`. `None` before a turn reports.
+pub fn cache_status(usage: Option<zeron_proto::ContextUsage>, now_ms: i64) -> Option<String> {
+    let cache = usage?.cache?;
+    let hit = cache.hit_fraction()?;
+    let mut text = format!("cache {}%", (hit * 100.0).round() as u32);
+    if let Some(left) = cache.warm_ms_left(now_ms) {
+        let mins = left / 60_000;
+        text.push_str(&if left == 0 {
+            " · cold".to_owned()
+        } else if mins >= 1 {
+            format!(" · warm {mins}m")
+        } else {
+            " · warm <1m".to_owned()
+        });
+    }
+    Some(text)
+}
+
 /// The binding limit: the most-used window of the account. Pure.
 pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
     account
@@ -68,6 +121,16 @@ pub struct AccountUsage {
 
 impl AccountUsage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        // The warm countdown moves with the clock, not with events.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STATUS_TICK).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
@@ -238,7 +301,20 @@ impl AccountUsage {
     /// The ring's reading: the live account's most-used window, when the
     /// harness has a live account with usage to show.
     fn fraction(&self, cx: &gpui::App) -> Option<f32> {
-        used_fraction(active_account(self.snapshot(cx)?, self.harness?)?)
+        let account = active_account(self.snapshot(cx)?, self.harness?)?.clone();
+        used_fraction(&self.live(account, cx))
+    }
+
+    /// `account` with Claude's per-turn windows laid over the polled ones.
+    fn live(&self, account: AgentAccount, cx: &gpui::App) -> AgentAccount {
+        if !account.active || account.harness != HarnessId::ClaudeCode {
+            return account;
+        }
+        with_live_windows(
+            account,
+            self.state.read(cx).context_usage,
+            chrono::Utc::now(),
+        )
     }
 
     /// A trigger click: open this ring's popover, or close it when the
@@ -306,6 +382,7 @@ impl AccountUsage {
             (Some(harness), Some(snapshot)) => accounts::provider_accounts(snapshot, harness)
                 .into_iter()
                 .cloned()
+                .map(|account| self.live(account, cx))
                 .collect(),
             _ => Vec::new(),
         };
@@ -462,10 +539,19 @@ impl Render for AccountUsage {
                 cx,
             )
         });
+        let status = cache_status(self.state.read(cx).context_usage, chrono::Utc::now().timestamp_millis()).map(|text| {
+            div()
+                .flex_none()
+                .pr(px(4.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(SharedString::from(text))
+        });
         div()
             .flex()
             .items_center()
             .gap(px(4.0))
+            .children(status)
             .children(account)
             .children(context)
     }
@@ -494,6 +580,47 @@ mod tests {
                 .collect::<Vec<_>>(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn live_windows_replace_the_polled_ones_until_they_reset() {
+        let now = chrono::Utc::now();
+        let mut polled = account(HarnessId::ClaudeCode, true, &[0.1, 0.2]);
+        polled.usage_windows[0].label = "Session".into();
+        polled.usage_windows[1].label = "Week".into();
+        let live = zeron_proto::ContextUsage {
+            five_hour: Some(zeron_proto::RateWindow {
+                used_permille: 410,
+                resets_at: now.timestamp() + 3600,
+            }),
+            seven_day: Some(zeron_proto::RateWindow {
+                used_permille: 900,
+                resets_at: now.timestamp() - 1,
+            }),
+            ..Default::default()
+        };
+        let merged = with_live_windows(polled, Some(live), now);
+        assert_eq!(merged.usage_windows[0].used_fraction, 0.41);
+        // A window past its reset keeps the polled value.
+        assert_eq!(merged.usage_windows[1].used_fraction, 0.2);
+    }
+
+    #[test]
+    fn cache_status_reads_hits_and_warmth() {
+        let usage = |ttl: Option<u32>| zeron_proto::ContextUsage {
+            cache: Some(zeron_proto::CacheStats {
+                read: 90,
+                write: 5,
+                input: 5,
+                ttl_secs: ttl,
+                at_ms: 0,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(cache_status(Some(usage(Some(3600))), 120_000).unwrap(), "cache 90% · warm 58m");
+        assert_eq!(cache_status(Some(usage(Some(300))), 400_000).unwrap(), "cache 90% · cold");
+        assert_eq!(cache_status(Some(usage(None)), 0).unwrap(), "cache 90%");
+        assert_eq!(cache_status(None, 0), None);
     }
 
     #[test]

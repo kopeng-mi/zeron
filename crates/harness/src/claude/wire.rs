@@ -201,6 +201,10 @@ pub(crate) struct RateLimitInfo {
     pub is_using_overage: bool,
     #[serde(rename = "overageInUse", default)]
     pub overage_in_use: bool,
+    /// Every plan window's usage, sent with each event (`five_hour`,
+    /// `seven_day`, …).
+    #[serde(rename = "unifiedWindows", default)]
+    pub unified_windows: std::collections::BTreeMap<String, UnifiedWindow>,
 }
 
 impl RateLimitInfo {
@@ -241,6 +245,30 @@ pub(crate) struct UsageBody {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation: CacheCreation,
+}
+
+/// Which TTL the turn's cache writes used.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CacheCreation {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
+}
+
+/// One plan window inside `rate_limit_info.unifiedWindows`.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct UnifiedWindow {
+    #[serde(default)]
+    pub utilization: f64,
+    #[serde(rename = "resetsAt", default)]
+    pub resets_at: i64,
 }
 
 /// A CLI→client control request (`can_use_tool` is the one we act on).

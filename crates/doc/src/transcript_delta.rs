@@ -516,6 +516,7 @@ mod context_update_tests {
             context_usage: Some(zeron_proto::ContextUsage {
                 tokens: Some(0),
                 window: Some(200000),
+                ..Default::default()
             }),
         })
         .unwrap();

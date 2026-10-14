@@ -729,6 +729,17 @@ pub enum AgentEvent {
         tokens: Option<u64>,
         window: Option<u64>,
     },
+    /// The turn's prompt-cache accounting (`at_ms` is stamped by the host).
+    /// Never persisted to docs as a part.
+    #[serde(rename_all = "camelCase")]
+    CacheStats { stats: CacheStats },
+    /// The plan's rate windows as the provider last reported them. Never
+    /// persisted to docs as a part.
+    #[serde(rename_all = "camelCase")]
+    RateLimits {
+        five_hour: Option<RateWindow>,
+        seven_day: Option<RateWindow>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -1015,12 +1026,62 @@ mod tests {
     }
 }
 
-/// Host-owned context snapshot, replicated with the chat document.
+/// Host-owned context snapshot, replicated with the chat document. Also
+/// carries the latest turn's prompt-cache accounting and the plan's rate
+/// windows, so the composer's status line reads one value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
     pub tokens: Option<u64>,
     pub window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<RateWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<RateWindow>,
+}
+
+/// One turn's prompt-cache accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStats {
+    /// Prompt tokens served from cache.
+    pub read: u64,
+    /// Prompt tokens written to cache.
+    pub write: u64,
+    /// Uncached prompt tokens.
+    pub input: u64,
+    /// How long the written cache lives (Claude: 300 or 3600 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u32>,
+    /// When the turn ended (epoch ms): the cache stays warm `ttl_secs` past it.
+    #[serde(default)]
+    pub at_ms: i64,
+}
+
+impl CacheStats {
+    /// Share of the prompt served from cache.
+    pub fn hit_fraction(self) -> Option<f64> {
+        let total = self.read + self.write + self.input;
+        (total > 0).then(|| self.read as f64 / total as f64)
+    }
+
+    /// Milliseconds of warmth left at `now_ms`, `None` when the TTL is unknown.
+    pub fn warm_ms_left(self, now_ms: i64) -> Option<i64> {
+        let ttl = i64::from(self.ttl_secs?) * 1000;
+        Some((self.at_ms + ttl - now_ms).max(0))
+    }
+}
+
+/// One plan rate-limit window (Claude's 5-hour and weekly).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateWindow {
+    /// Used share in thousandths (0..=1000).
+    pub used_permille: u16,
+    /// Reset time, epoch seconds.
+    pub resets_at: i64,
 }
 
 impl ContextUsage {

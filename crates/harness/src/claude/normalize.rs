@@ -764,16 +764,35 @@ impl Normalizer {
             // turn — make it visible; allowed/allowed_warning stay quiet, and
             // so does a reject the account's overage carries past.
             Frame::RateLimit(f) => {
+                // Every event carries the plan's windows: the composer's
+                // limit ring updates per turn instead of polling.
+                let window = |key: &str| {
+                    f.rate_limit_info.unified_windows.get(key).map(|w| zeron_proto::RateWindow {
+                        used_permille: (w.utilization.clamp(0.0, 1.0) * 1000.0).round() as u16,
+                        resets_at: w.resets_at,
+                    })
+                };
+                let five_hour = window("five_hour");
+                let seven_day = window("seven_day");
+                let limits = (five_hour.is_some() || seven_day.is_some()).then_some(
+                    AgentEvent::RateLimits {
+                        five_hour,
+                        seven_day,
+                    },
+                );
                 if !f.rate_limit_info.blocks() {
-                    return Vec::new();
+                    return limits.into_iter().collect();
                 }
                 let window =
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
-                vec![AgentEvent::Error {
-                    message: format!(
-                        "Claude {window} limit reached — the turn was blocked. Try again after it resets."
-                    ),
-                }]
+                limits
+                    .into_iter()
+                    .chain([AgentEvent::Error {
+                        message: format!(
+                            "Claude {window} limit reached — the turn was blocked. Try again after it resets."
+                        ),
+                    }])
+                    .collect()
             }
 
             Frame::Result(f) => {
@@ -799,6 +818,24 @@ impl Normalizer {
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
+                };
+                let written = &f.usage.cache_creation;
+                let cache = AgentEvent::CacheStats {
+                    stats: zeron_proto::CacheStats {
+                        read: f.usage.cache_read_input_tokens,
+                        write: f.usage.cache_creation_input_tokens,
+                        input: f.usage.input_tokens,
+                        // A reads-only turn doesn't say; the host keeps the
+                        // last known TTL.
+                        ttl_secs: if written.ephemeral_1h_input_tokens > 0 {
+                            Some(3600)
+                        } else if written.ephemeral_5m_input_tokens > 0 {
+                            Some(300)
+                        } else {
+                            None
+                        },
+                        at_ms: 0,
+                    },
                 };
                 let aborted = interrupted
                     || f
@@ -873,7 +910,7 @@ impl Normalizer {
                         window: Some(window),
                     });
                 }
-                out.extend([usage, done]);
+                out.extend([usage, cache, done]);
                 out
             }
 
@@ -988,6 +1025,47 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_events_carry_the_plan_windows() {
+        // Captured from claude 2.1.296 (an allowed event every turn).
+        let events = normalize_one(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1791995400,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.41,"resetsAt":1791995400},"seven_day":{"utilization":0.12,"resetsAt":1792566000}}}}"#,
+        );
+        assert_eq!(
+            events,
+            [AgentEvent::RateLimits {
+                five_hour: Some(zeron_proto::RateWindow {
+                    used_permille: 410,
+                    resets_at: 1791995400
+                }),
+                seven_day: Some(zeron_proto::RateWindow {
+                    used_permille: 120,
+                    resets_at: 1792566000
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn results_report_cache_hits_and_the_ttl_they_wrote() {
+        let cache_of = |raw: &str| {
+            normalize_one(raw).into_iter().find_map(|e| match e {
+                AgentEvent::CacheStats { stats } => Some(stats),
+                _ => None,
+            })
+        };
+        let read_only = cache_of(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":20229,"output_tokens":93,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!((read_only.read, read_only.input, read_only.ttl_secs), (20229, 2, None));
+        let hour = cache_of(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"cache_creation_input_tokens":800,"cache_read_input_tokens":0,"output_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":800,"ephemeral_5m_input_tokens":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!((hour.write, hour.ttl_secs), (800, Some(3600)));
+    }
+
+    #[test]
     fn a_rejected_window_carried_by_overage_is_not_an_error() {
         let blocked = normalize_one(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
@@ -1007,8 +1085,8 @@ mod tests {
 
     fn result_done(raw: &str) -> AgentEvent {
         let events = normalize_one(raw);
-        assert_eq!(events.len(), 2, "usage + done");
-        events.into_iter().nth(1).expect("done event")
+        assert_eq!(events.len(), 3, "usage + cache + done");
+        events.into_iter().nth(2).expect("done event")
     }
 
     #[test]
