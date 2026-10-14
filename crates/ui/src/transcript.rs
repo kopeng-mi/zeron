@@ -3473,6 +3473,11 @@ pub struct Transcript {
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
     hovered_entry: Option<(SharedString, SharedString)>,
+    /// Rewind preview: rows from this index on are dimmed — what a rewind
+    /// to the highlighted (or edited) prompt removes.
+    rewind_dim_from: Option<usize>,
+    /// User rows offer an Edit action (the main chat only).
+    prompt_edit: bool,
     /// Code block showing "Copied" feedback: `(row id, block ix)`, cleared by
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
@@ -3548,6 +3553,8 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// A user message's Edit action: put that prompt back in the composer.
+    EditPrompt { entry_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3790,6 +3797,8 @@ impl Transcript {
             bottom_clearance: 0.0,
             rail_hover: None,
             hovered_entry: None,
+            rewind_dim_from: None,
+            prompt_edit: false,
             copied_code: None,
             copied_clear: None,
             code_fences: HashMap::new(),
@@ -4656,6 +4665,28 @@ impl Transcript {
     /// more than [`SCROLL_BUTTON_THRESHOLD_PX`] off the end, unpinned).
     pub fn jump_button_shown(&self) -> bool {
         self.show_jump_button
+    }
+
+    /// Show the Edit action on user rows.
+    pub fn set_prompt_edit(&mut self, enabled: bool) {
+        self.prompt_edit = enabled;
+    }
+
+    /// Rewind preview: glide to `entry_id`'s first row and dim it and every
+    /// row after it. `None` clears the dim; the scroll stays where it is.
+    pub fn preview_rewind(&mut self, entry_id: Option<&str>, cx: &mut Context<Self>) {
+        let Some(entry_id) = entry_id else {
+            if self.rewind_dim_from.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let Some(first) = self.rows.iter().position(|r| r.entry_id == entry_id) else {
+            return;
+        };
+        self.rewind_dim_from = Some(first);
+        self.scroll_to_row(first, cx);
+        cx.notify();
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
@@ -7681,12 +7712,43 @@ impl Transcript {
                         .text_color(theme.text_muted),
                     )
             });
+            // Your own prompts: put this one back in the composer to edit and
+            // resend (the shell decides what that restores).
+            let edit = (is_user_row && self.prompt_edit).then(|| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("edit-message-hover-{entry_id}");
+                div()
+                    .id(SharedString::from(format!("edit-message-{entry_id}")))
+                    .size(px(Theme::SPACE_MD * 2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(
+                        &fade_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
+                    .on_hover(motion::hover_listener(fade_key))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(TranscriptEvent::EditPrompt {
+                            entry_id: entry_id.to_string(),
+                        });
+                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip("Edit message"))
+                    .child(
+                        crate::icons::icon(crate::icons::PEN)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+            });
             let metadata = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            let metadata = metadata.child(timestamp).children(edit).children(copy);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -7751,6 +7813,9 @@ impl Transcript {
                     .w_full()
                     .max_w(px(self.content_width))
                     .min_w_0()
+                    .when(self.rewind_dim_from.is_some_and(|from| ix >= from), |el| {
+                        el.opacity(0.35)
+                    })
                     .child(inner)
                     .children(strip)
                     .children(trailer),

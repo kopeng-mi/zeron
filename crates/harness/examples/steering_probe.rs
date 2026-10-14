@@ -54,6 +54,9 @@ async fn main() -> anyhow::Result<()> {
         attachments: vec![],
         worktree: None,
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     };
     let controls = RunControls {
         realtime: None,

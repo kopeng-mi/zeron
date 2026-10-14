@@ -295,12 +295,9 @@ impl Normalizer {
         {
             return norm;
         }
-        let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
-            return norm;
-        };
-        let Some(file) = projects.flatten().find_map(|project| {
-            std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
-        }) else {
+        let Some(file) = session_file(config_root, session_id)
+            .and_then(|path| std::fs::File::open(path).ok())
+        else {
             return norm;
         };
         let mut reader = std::io::BufReader::with_capacity(1 << 16, file);
@@ -882,6 +879,27 @@ impl Normalizer {
             | Frame::Other => Vec::new(),
         }
     }
+}
+
+/// The CLI's saved session file for `session_id`. Session ids are global;
+/// search the project directories rather than duplicating the CLI's cwd
+/// encoding (including long-path hashing).
+pub(crate) fn session_file(
+    config_root: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    std::fs::read_dir(config_root.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(format!("{session_id}.jsonl")))
+        .find(|path| path.is_file())
 }
 
 #[cfg(test)]

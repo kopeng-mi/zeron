@@ -272,6 +272,9 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
         worktree: None,
     }
 }

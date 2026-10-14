@@ -129,6 +129,9 @@ async fn worker() {
             auto_approve: true,
             attachments: vec![],
             resume: None,
+            rewind_to: None,
+            prompt_id: None,
+            resume_at: None,
             worktree: None,
         };
         let mut events = harness.run(request, controls).await.unwrap();

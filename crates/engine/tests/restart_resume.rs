@@ -49,6 +49,9 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     }
 }
 
@@ -1042,6 +1045,9 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     };
     let assemble_real = || {
         EngineCore::assemble(

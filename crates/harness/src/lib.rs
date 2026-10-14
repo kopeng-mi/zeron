@@ -232,6 +232,22 @@ pub trait Harness: Send + Sync {
             source: "live",
         })
     }
+    /// Where to resume `session_id` so the turn the chat's `message_id`
+    /// opened (with `prompt` as its text), and everything after it, is
+    /// forgotten: `Some(id)` resumes at that harness message
+    /// ([`RunRequest::resume_at`]), `None` starts a fresh session. Drivers
+    /// that cannot cut a session refuse.
+    async fn rewind_point(
+        &self,
+        _session_id: &str,
+        _message_id: &str,
+        _prompt: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        Err(HarnessError::Protocol(format!(
+            "{} can't rewind a conversation yet",
+            self.display_name()
+        )))
+    }
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {

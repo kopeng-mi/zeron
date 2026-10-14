@@ -85,6 +85,9 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     attachments: vec![],
                     worktree: None,
                     resume: None,
+                    rewind_to: None,
+                    prompt_id: None,
+                    resume_at: None,
                 },
             },
         )

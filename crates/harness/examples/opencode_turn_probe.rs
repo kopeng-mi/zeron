@@ -53,6 +53,9 @@ async fn main() {
         auto_approve: !answer_yes,
         attachments: Vec::new(),
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
         worktree: None,
     };
     let mut harness = OpencodeHarness::new();

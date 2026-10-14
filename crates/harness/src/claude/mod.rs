@@ -46,6 +46,7 @@
 pub mod catalog;
 mod discovery;
 mod normalize;
+mod rewind;
 mod wire;
 
 use std::path::PathBuf;
@@ -274,6 +275,11 @@ impl ClaudeHarness {
         cmd.args(Self::launch_args(request));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
+            // A rewind: resume cut back at this message (in place — the
+            // session keeps its id and later plain resumes follow the cut).
+            if let Some(at) = &request.resume_at {
+                cmd.arg(format!("--resume-session-at={at}"));
+            }
         }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -547,6 +553,30 @@ impl Harness for ClaudeHarness {
         self.discover_commands(None).await
     }
 
+    /// Read off the CLI's own session file on this device.
+    async fn rewind_point(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        prompt: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        let config = crate::model_context::root(
+            "CLAUDE_CONFIG_DIR",
+            crate::executable::home_or_current_dir().join(".claude"),
+        );
+        let (session_id, message_id, prompt) =
+            (session_id.to_owned(), message_id.to_owned(), prompt.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let file = normalize::session_file(&config, &session_id)
+                .ok_or_else(|| "Claude's saved session for this chat is missing".to_string())?;
+            let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            rewind::rewind_point(text.lines(), &message_id, &prompt)
+        })
+        .await
+        .map_err(|e| HarnessError::Protocol(e.to_string()))?
+        .map_err(HarnessError::Protocol)
+    }
+
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
         self.workspace_commands
             .get(cwd, self.discover_commands(Some(cwd)))
@@ -655,7 +685,7 @@ impl ClaudeHarness {
         // also ride the prompt text, so a skipped/unreadable file degrades to
         // the old-app behavior (the agent opens the path with its Read tool).
         let images = load_image_blocks(&request.attachments).await;
-        let first_command = uuid::Uuid::new_v4().to_string();
+        let first_command = turn_uuid(request.prompt_id.as_deref());
         let first = wire::prompt_line(
             &apply_ultrathink(request.reasoning, &request.prompt),
             &first_command,
@@ -768,6 +798,16 @@ async fn load_image_blocks(paths: &[String]) -> Vec<wire::ImageBlock> {
 
 /// Owns the child's stdin; a write failure (EPIPE after the child died) is
 /// tolerated and logged.
+/// The `uuid` a user line goes out with. The chat's own message id when it
+/// is one: the CLI stores the turn under it, so a rewind can find the turn
+/// in the session file. Anything else gets a fresh id.
+fn turn_uuid(message_id: Option<&str>) -> String {
+    message_id
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .unwrap_or_else(uuid::Uuid::new_v4)
+        .to_string()
+}
+
 async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<StdinMsg>) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -1077,7 +1117,7 @@ async fn run_session(session: Session) {
                         }
                         config = *next;
                     }
-                    let id = uuid::Uuid::new_v4().to_string();
+                    let id = turn_uuid(msg.message_id.as_deref());
                     let images = load_image_blocks(&msg.attachments).await;
                     let line = wire::steer_message_line_with_images(
                         &apply_ultrathink(config.reasoning, &msg.prompt),

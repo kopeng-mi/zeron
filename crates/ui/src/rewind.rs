@@ -57,6 +57,27 @@ pub fn rewind_prompts(transcript: &[SessionMessageEntry]) -> Vec<RewindPrompt> {
     out
 }
 
+/// The restorable prompt for one transcript entry — the Edit action on a user
+/// message. A continuation resolves to the send it folds into, so every row
+/// of one prompt restores the same text. `None` for anything not listed.
+pub fn prompt_for(transcript: &[SessionMessageEntry], entry_id: &str) -> Option<RewindPrompt> {
+    let entry = transcript.iter().find(|e| e.id == entry_id)?;
+    let head = entry.continuation_of.as_deref().unwrap_or(entry_id);
+    rewind_prompts(transcript)
+        .into_iter()
+        .find(|p| p.message_id == head)
+}
+
+/// How many transcript messages a rewind to `message_id` removes: that
+/// message and every one after it, continuations counted with their head.
+pub fn removed_count(transcript: &[SessionMessageEntry], message_id: &str) -> usize {
+    transcript
+        .iter()
+        .skip_while(|e| e.id != message_id)
+        .filter(|e| e.continuation_of.is_none())
+        .count()
+}
+
 /// The prompt a user actually typed: text parts joined, then the machine-added
 /// `Attached images (local files …)` trailer stripped. Restoring that trailer
 /// would put generated bookkeeping into the composer as if it were prose.
@@ -108,6 +129,7 @@ mod tests {
             device_id: "d".into(),
             status: None,
             continuation_of: None,
+            duration_ms: None,
         }
     }
 
@@ -154,6 +176,34 @@ mod tests {
             text: "two".into(),
         });
         assert_eq!(rewind_prompts(&[e])[0].text, "one\ntwo");
+    }
+
+    #[test]
+    fn edit_on_a_continuation_restores_its_send() {
+        let mut tail = entry("a2", MessageRole::User, "more", 2);
+        tail.continuation_of = Some("a".into());
+        let transcript = vec![
+            entry("a", MessageRole::User, "start", 1),
+            tail,
+            entry("b", MessageRole::Assistant, "reply", 3),
+        ];
+        assert_eq!(prompt_for(&transcript, "a2").unwrap().text, "start");
+        assert_eq!(prompt_for(&transcript, "a").unwrap().message_id, "a");
+        assert!(prompt_for(&transcript, "b").is_none());
+        assert!(prompt_for(&transcript, "missing").is_none());
+    }
+
+    #[test]
+    fn removed_count_includes_the_edited_message() {
+        let transcript = vec![
+            entry("a", MessageRole::User, "one", 1),
+            entry("b", MessageRole::Assistant, "reply", 2),
+            entry("c", MessageRole::User, "two", 3),
+            entry("d", MessageRole::Assistant, "reply", 4),
+        ];
+        assert_eq!(removed_count(&transcript, "c"), 2);
+        assert_eq!(removed_count(&transcript, "a"), 4);
+        assert_eq!(removed_count(&transcript, "zz"), 0);
     }
 
     #[test]

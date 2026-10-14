@@ -415,6 +415,25 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Rewind: remove the entry `message_id` and every entry after it.
+    /// Returns how many went; 0 when the entry is not here (already cut).
+    pub fn truncate_from(&self, message_id: &str) -> Result<usize, DocError> {
+        let messages = self.doc.get_list("messages");
+        // Raw list positions: a malformed entry still occupies its slot.
+        let raw = messages.get_deep_value().to_json_value();
+        let Some(start) = raw.as_array().and_then(|entries| {
+            entries
+                .iter()
+                .position(|e| e.get("id").and_then(serde_json::Value::as_str) == Some(message_id))
+        }) else {
+            return Ok(0);
+        };
+        let removed = messages.len() - start;
+        messages.delete(start, removed)?;
+        self.doc.commit();
+        Ok(removed)
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
@@ -1434,6 +1453,33 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn truncate_from_drops_the_entry_and_everything_after() {
+        let doc = SessionDoc::init("rewind").unwrap();
+        for (ix, id) in ["u1", "a1", "u2", "a2"].into_iter().enumerate() {
+            doc.push_message(&SessionMessageEntry {
+                duration_ms: None,
+                id: id.into(),
+                role: if ix % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
+                parts: Vec::new(),
+                created_at: ix as i64,
+                device_id: "dev".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(doc.truncate_from("u2").unwrap(), 2);
+        let ids: Vec<_> = doc.read_entries().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["u1", "a1"]);
+        // Already cut: nothing to do.
+        assert_eq!(doc.truncate_from("u2").unwrap(), 0);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

@@ -211,6 +211,9 @@ impl TitleGenerator {
                 auto_approve: false,
                 attachments: Vec::new(),
                 resume: None,
+                rewind_to: None,
+                prompt_id: None,
+                resume_at: None,
                 worktree: None,
             };
             match tokio::time::timeout(
@@ -380,6 +383,9 @@ mod tests {
             sandbox: SandboxLevel::ReadOnly,
             auto_approve: false,
             resume: None,
+            rewind_to: None,
+            prompt_id: None,
+            resume_at: None,
             attachments: vec![],
             worktree: None,
         };

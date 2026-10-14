@@ -111,6 +111,9 @@ fn run(
         attachments: vec![],
         worktree: None,
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     }
 }
 

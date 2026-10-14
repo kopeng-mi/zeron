@@ -147,6 +147,11 @@ fn rewind_tap(last: Option<Instant>, now: Instant) -> (bool, Option<Instant>) {
 /// The open rewind list: a highlight into the newest-first prompt list.
 struct RewindState {
     selected: usize,
+    /// The chat the list was opened in; switching chats closes it.
+    chat_id: Option<String>,
+    /// The transcript was following the bottom when the list opened, so a
+    /// cancel glides back there instead of leaving it on the preview.
+    was_pinned: bool,
 }
 
 /// Restore a default focus only after an in-flight handoff has had a frame to
@@ -2353,6 +2358,9 @@ pub struct Shell {
     /// When Escape last reached the shell in the chat route, for the
     /// double-tap test.
     last_chat_escape: Option<Instant>,
+    /// A user message's Edit click, restored on the next render — the event
+    /// arrives without a window to move focus with.
+    edit_prompt_pending: Option<crate::rewind::RewindPrompt>,
     /// Clears the jump hints when the window deactivates: a Cmd+Tab away
     /// swallows the key-up, so without this the chips stay on screen for good.
     activation_sub: Option<Subscription>,
@@ -2451,10 +2459,15 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                // Editing an earlier message: dim what the send removes.
+                ComposerEvent::EditChanged(message_id) => {
+                    transcript.update(cx, |t, cx| t.preview_rewind(message_id.as_deref(), cx));
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
+        transcript.update(cx, |t, _| t.set_prompt_edit(true));
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| {
@@ -2747,6 +2760,7 @@ impl Shell {
             rewind_return_focus: None,
             rewind_focus_pending: false,
             last_chat_escape: None,
+            edit_prompt_pending: None,
             unfocused: cx.focus_handle(),
             activation_sub: None,
             clock: ClockRedraw::default(),
@@ -4311,6 +4325,14 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+            TranscriptEvent::EditPrompt { entry_id } => {
+                let prompt =
+                    crate::rewind::prompt_for(&self.state.read(cx).transcript, entry_id);
+                if prompt.is_some() {
+                    self.edit_prompt_pending = prompt;
+                    cx.notify();
+                }
             }
         }
     }
@@ -10574,7 +10596,7 @@ impl Shell {
             return;
         }
         if event.keystroke.key == "escape" && self.rewind.is_some() {
-            self.close_rewind(window, cx);
+            self.close_rewind(true, window, cx);
             cx.stop_propagation();
             return;
         }
@@ -10624,7 +10646,12 @@ impl Shell {
                 if matches!(self.route, Route::Chat)
                     && composer.entity_id() == self.composer.entity_id() =>
             {
-                self.on_chat_escape(window, cx);
+                if self.composer.read(cx).is_editing(cx) {
+                    self.composer.update(cx, |composer, cx| composer.cancel_edit(cx));
+                    cx.stop_propagation();
+                } else {
+                    self.on_chat_escape(window, cx);
+                }
             }
             ShellEscapeOutcome::OtherKey | ShellEscapeOutcome::Ignored => {}
         }
@@ -10638,16 +10665,47 @@ impl Shell {
         if !paired || self.rewind_prompts(cx).is_empty() {
             return;
         }
+        self.open_rewind(0, window, cx);
+    }
+
+    /// Open the list with `selected` highlighted (0 = newest prompt).
+    fn open_rewind(&mut self, selected: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.rewind_return_focus = window.focused(cx);
-        self.rewind = Some(RewindState { selected: 0 });
+        self.rewind = Some(RewindState {
+            selected,
+            chat_id: self.state.read(cx).selected_chat.clone(),
+            was_pinned: self.transcript.read(cx).is_pinned(),
+        });
         self.rewind_focus_pending = true;
+        self.preview_rewind(cx);
         cx.notify();
     }
 
-    fn close_rewind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rewind.take().is_none() {
+    /// Scroll the transcript to the highlighted prompt and dim what follows.
+    fn preview_rewind(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.rewind.as_ref().map(|r| r.selected) else {
             return;
-        }
+        };
+        let Some(prompt) = self.rewind_prompts(cx).into_iter().nth(selected) else {
+            return;
+        };
+        self.transcript.update(cx, |transcript, cx| {
+            transcript.preview_rewind(Some(&prompt.message_id), cx)
+        });
+    }
+
+    /// Close the list. `cancelled` (Escape, chat switch) also glides back to
+    /// the bottom when the transcript was following it before the preview.
+    fn close_rewind(&mut self, cancelled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.rewind.take() else {
+            return;
+        };
+        self.transcript.update(cx, |transcript, cx| {
+            transcript.preview_rewind(None, cx);
+            if cancelled && state.was_pinned {
+                transcript.jump_to_bottom(cx);
+            }
+        });
         self.last_chat_escape = None;
         if let Some(handle) = self.rewind_return_focus.take() {
             window.focus(&handle, cx);
@@ -10671,6 +10729,7 @@ impl Shell {
             return;
         }
         state.selected = state.selected.saturating_add_signed(delta).min(count - 1);
+        self.preview_rewind(cx);
         cx.notify();
     }
 
@@ -10705,9 +10764,9 @@ impl Shell {
     ) {
         // Close first: it hands focus back, which must happen before the
         // caret lands at the end of the restored text.
-        self.close_rewind(window, cx);
+        self.close_rewind(false, window, cx);
         self.composer
-            .update(cx, |composer, cx| composer.set_prompt(&prompt.text, cx));
+            .update(cx, |composer, cx| composer.begin_edit(&prompt, cx));
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
     }
@@ -13659,6 +13718,14 @@ impl Render for Shell {
         self.observe_viewport_width(f32::from(window.viewport_size().width), cx);
         if std::mem::take(&mut self.rewind_focus_pending) && self.rewind.is_some() {
             window.focus(&self.rewind_focus, cx);
+        }
+        if self.rewind.as_ref().is_some_and(|r| {
+            r.chat_id.as_deref() != self.state.read(cx).selected_chat.as_deref()
+        }) {
+            self.close_rewind(false, window, cx);
+        }
+        if let Some(prompt) = self.edit_prompt_pending.take() {
+            self.restore_prompt(prompt, window, cx);
         }
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.

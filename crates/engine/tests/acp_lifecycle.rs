@@ -66,6 +66,9 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 attachments: Vec::new(),
                 worktree: None,
                 resume: None,
+                rewind_to: None,
+                prompt_id: None,
+                resume_at: None,
             },
         },
     );

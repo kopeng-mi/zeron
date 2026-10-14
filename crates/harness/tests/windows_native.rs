@@ -215,6 +215,9 @@ fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: resume.map(str::to_owned),
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     }
 }
 

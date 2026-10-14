@@ -864,6 +864,11 @@ impl ChatDocHandle {
         })
     }
 
+    /// Rewind: drop `message_id` and everything after it from the transcript.
+    pub fn truncate_from(&self, message_id: &str) -> Result<usize, DocError> {
+        self.doc.truncate_from(message_id)
+    }
+
     /// Recovery sweep: settle this device's running subagent chips (including
     /// chips in completed parent turns), then stamp abandoned `streaming`
     /// entries `aborted`, appending
@@ -5910,6 +5915,9 @@ impl DocHost {
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
+            rewind_to: None,
+            prompt_id: None,
+            resume_at: None,
             worktree: None,
         })
     }

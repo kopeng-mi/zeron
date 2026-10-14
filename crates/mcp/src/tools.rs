@@ -1113,6 +1113,9 @@ impl Tools {
                         .unwrap_or(SandboxLevel::WorkspaceWrite),
                     auto_approve: false,
                     resume: None,
+                    rewind_to: None,
+                    prompt_id: None,
+                    resume_at: None,
                     attachments: Vec::new(),
                     worktree: None,
                 };

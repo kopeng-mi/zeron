@@ -19,6 +19,9 @@ fn run_request_attachments_survive_command_round_trip() {
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),

@@ -334,6 +334,23 @@ pub struct RunRequest {
     pub auto_approve: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
+    /// Rewind before running: the chat's message id to cut back to. That
+    /// message and everything after it leave the transcript and the
+    /// harness session, and this prompt takes its place. Set by the sender;
+    /// the host resolves it into [`Self::resume_at`]. Additive +
+    /// serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind_to: Option<String>,
+    /// Harness-native message id to resume `resume` at (Claude
+    /// `--resume-session-at`): everything after it is forgotten. Set by the
+    /// host while dispatching a rewind, never by senders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_at: Option<String>,
+    /// The chat's message id for this prompt. Drivers that can tag a turn
+    /// with it do (Claude: the user line's `uuid`), so a later rewind finds
+    /// the turn in the harness session. Set by the host, never by senders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
     /// (composer uploads: UploadChunk/UploadCommit → durable path). The same
     /// paths also ride the prompt text as `Attached images (local files …)`

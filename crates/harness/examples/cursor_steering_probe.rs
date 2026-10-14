@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
         harness: None, model: Some(model), reasoning: None,
         model_options: Default::default(), cwd: workspace.path().to_string_lossy().into_owned(),
         sandbox: SandboxLevel::DangerFullAccess, auto_approve: true,
-        attachments: vec![], worktree: None, resume: None,
+        attachments: vec![], worktree: None, resume: None, rewind_to: None, prompt_id: None, resume_at: None,
     };
     let mut stream = CursorHarness::new()
         .run(

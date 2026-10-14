@@ -498,6 +498,17 @@ pub enum SendButtonMode {
     Stop,
 }
 
+/// An earlier prompt being edited ([`Composer::begin_edit`]).
+struct RewindEdit {
+    chat_id: String,
+    message_id: String,
+    /// Transcript messages the send removes (the edited one included).
+    removed: usize,
+    /// The chat's agent can cut its session; otherwise the send is a plain
+    /// new message.
+    rewinds: bool,
+}
+
 /// Per-chat bookkeeping for attachment chips. Numbers only grow within a draft,
 /// so a removed attachment never renumbers or retargets an earlier mention.
 #[derive(Default)]
@@ -1790,6 +1801,8 @@ pub enum ComposerInputEvent {
     MentionNavigate(isize),
     MentionAccept,
     MentionDismiss,
+    /// ↑ in an empty input: bring back the last prompt, like a terminal.
+    RecallLast,
     /// Images pasted from the clipboard (screenshots / copied image data) —
     /// the wrapper stages them as attachments (use-attachments.ts onPaste).
     PastedImages(Vec<gpui::Image>),
@@ -3215,6 +3228,10 @@ impl ComposerInput {
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
             cx.emit(ComposerInputEvent::MentionNavigate(-1));
+            return;
+        }
+        if self.content.is_empty() {
+            cx.emit(ComposerInputEvent::RecallLast);
             return;
         }
         if let Some((ix, affinity, column)) = self.vertical_target(-1.0) {
@@ -5356,6 +5373,9 @@ impl Render for ComposerInput {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// An earlier message is being edited (`Some(message id)`: dim it and
+    /// everything after it) or no longer is (`None`).
+    EditChanged(Option<String>),
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -5980,6 +6000,9 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
 pub struct Composer {
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
+    /// An earlier prompt back in the composer for editing: sending it
+    /// rewinds the chat to before that message.
+    rewind_edit: Option<RewindEdit>,
     /// Draft displaced while a queued message occupies the composer.
     pub(crate) queue_edit_draft: Option<(String, Vec<StagedAttachment>, Vec<CapturedAppshot>)>,
     /// The displaced draft's chip numbering and undo stash. The queued
@@ -6268,6 +6291,7 @@ impl Composer {
                 }
             }
             ComposerInputEvent::OpenAttachment(index) => this.open_attachment(*index, cx),
+            ComposerInputEvent::RecallLast => this.recall_last_prompt(cx),
             ComposerInputEvent::PastedImages(images) => {
                 let images = images.clone();
                 this.stage_in_background(
@@ -6313,6 +6337,7 @@ impl Composer {
         let mut composer = Self {
             state,
             input,
+            rewind_edit: None,
             queue_edit_draft: None,
             queue_edit_attachment_draft: None,
             pickers,
@@ -7375,6 +7400,59 @@ impl Composer {
         });
     }
 
+    /// ↑ in an empty composer: edit the chat's newest prompt.
+    fn recall_last_prompt(&mut self, cx: &mut Context<Self>) {
+        let last = crate::rewind::rewind_prompts(&self.state.read(cx).transcript)
+            .into_iter()
+            .next();
+        if let Some(prompt) = last {
+            self.begin_edit(&prompt, cx);
+        }
+    }
+
+    /// Edit an earlier prompt: its text comes back here, and sending it
+    /// rewinds the chat to before it (Claude chats; other agents only get
+    /// the text back).
+    pub fn begin_edit(&mut self, prompt: &crate::rewind::RewindPrompt, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(chat_id) = state.selected_chat.clone() else {
+            self.set_prompt(&prompt.text, cx);
+            return;
+        };
+        let removed = crate::rewind::removed_count(&state.transcript, &prompt.message_id);
+        let rewinds = self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode);
+        self.set_prompt(&prompt.text, cx);
+        self.rewind_edit = Some(RewindEdit {
+            chat_id,
+            message_id: prompt.message_id.clone(),
+            removed,
+            rewinds,
+        });
+        cx.emit(ComposerEvent::EditChanged(
+            rewinds.then(|| prompt.message_id.clone()),
+        ));
+        cx.notify();
+    }
+
+    /// Whether an earlier message is being edited in this chat.
+    pub fn is_editing(&self, cx: &App) -> bool {
+        self.active_edit(cx).is_some()
+    }
+
+    fn active_edit(&self, cx: &App) -> Option<&RewindEdit> {
+        self.rewind_edit
+            .as_ref()
+            .filter(|edit| self.state.read(cx).selected_chat.as_deref() == Some(&edit.chat_id))
+    }
+
+    /// Stop editing: nothing is cut, and the text stays as a normal draft.
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.rewind_edit.take().is_some() {
+            cx.emit(ComposerEvent::EditChanged(None));
+            cx.notify();
+        }
+    }
+
     /// Replace the prompt text — the rewind list restoring an earlier send.
     /// Goes through the same path as typing, so the draft cache, mention
     /// scanning, and height measurement all stay consistent.
@@ -8423,6 +8501,10 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        // Leaving the chat ends an edit: its dim belongs to that transcript.
+        if self.rewind_edit.is_some() && !self.is_editing(cx) {
+            self.cancel_edit(cx);
+        }
         {
             let state = self.state.read(cx);
             // AppState also notifies at clock-only transitions, so a run that
@@ -8933,9 +9015,18 @@ impl Composer {
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
+        // An edited earlier message replaces it and everything after: the
+        // host stops a turn in flight, so it never waits in the queue.
+        let editing = self.rewind_edit.take();
+        if editing.is_some() {
+            cx.emit(ComposerEvent::EditChanged(None));
+        }
+        let rewind_to = editing
+            .filter(|edit| edit.rewinds && edit.chat_id == chat_id)
+            .map(|edit| edit.message_id);
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.
-        let queue = queue && !is_new;
+        let queue = queue && !is_new && rewind_to.is_none();
         let clean_queue_attachment_text = staged.is_empty()
             || (engine
                 .engine_info()
@@ -9429,6 +9520,9 @@ impl Composer {
                         sandbox: SandboxLevel::WorkspaceWrite,
                         auto_approve: false,
                         resume: None,
+                        rewind_to: rewind_to.clone(),
+                        prompt_id: None,
+                        resume_at: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
                     },
@@ -10902,6 +10996,41 @@ impl Render for Composer {
                         this.failure_key = None;
                         cx.notify();
                     })),
+                )
+            })
+            .when_some(self.active_edit(cx).map(|e| (e.removed, e.rewinds)), |el, (removed, rewinds)| {
+                let text: SharedString = if rewinds {
+                    format!(
+                        "Editing an earlier message \u{b7} sending removes {removed} message{} and Claude forgets them",
+                        if removed == 1 { "" } else { "s" }
+                    )
+                    .into()
+                } else {
+                    "Only Claude chats can rewind \u{b7} this sends as a new message".into()
+                };
+                el.child(
+                    div()
+                        .id("composer-rewind-edit")
+                        .mx(px(8.0))
+                        .mt(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_muted)
+                        .child(crate::icons::icon(crate::icons::PEN).size(px(11.0)).text_color(theme.text_muted))
+                        .child(div().flex_1().min_w_0().truncate().child(text))
+                        .child(
+                            div()
+                                .id("composer-rewind-cancel")
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(theme.text)
+                                .hover(|s| s.underline())
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx)))
+                                .child("Cancel (esc)"),
+                        ),
                 )
             })
             .when_some(queue_notice, |el, (notice, offline)| {

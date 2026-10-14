@@ -243,6 +243,16 @@ struct Inner {
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+/// The copy kept for re-dispatches (steer→new-turn fallback): the rewind
+/// cut and the prompt's id belong to the one run that carried them.
+fn stored_request(request: &RunRequest) -> RunRequest {
+    let mut stored = request.clone();
+    stored.rewind_to = None;
+    stored.resume_at = None;
+    stored.prompt_id = None;
+    stored
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -591,6 +601,11 @@ impl SessionsEngine {
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
+        // An edited earlier message: cut the transcript and the harness
+        // session back to before it, then run this prompt in its place.
+        if let Some(target) = request.rewind_to.take() {
+            self.rewind(chat_id, harness_id, &mut request, &target).await?;
+        }
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -674,7 +689,8 @@ impl SessionsEngine {
                     {
                         h.runtime_config.request = request.clone();
                     }
-                    lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+                    lock(&self.inner.last_requests)
+                        .insert(chat_id.to_string(), stored_request(&request));
                 }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -734,6 +750,7 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
+        request.prompt_id = Some(user_id.clone());
         if !idle {
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
@@ -750,7 +767,7 @@ impl SessionsEngine {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
         }
-        lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+        lock(&self.inner.last_requests).insert(chat_id.to_string(), stored_request(&request));
 
         let run_id = new_id();
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
@@ -1075,6 +1092,56 @@ impl SessionsEngine {
         self.terminate(chat_id).await
     }
 
+    /// Cut `chat_id` back to before the user message `target`: stop the live
+    /// runtime (a turn in flight ends), find where the harness session must
+    /// resume so it forgets that turn and everything after it, then drop
+    /// those entries from the transcript. `request` resumes at the cut.
+    async fn rewind(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        request: &mut RunRequest,
+        target: &str,
+    ) -> Result<(), EngineError> {
+        let handle = self.doc_handle(chat_id)?;
+        let entries = handle.doc().read_entries().map_err(|e| EngineError::Other(e.to_string()))?;
+        let Some(entry) = entries.iter().find(|e| e.id == target) else {
+            // Already cut (a re-executed command): nothing left to drop.
+            return Ok(());
+        };
+        let prompt: String = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("
+");
+        self.terminate(chat_id).await?;
+        let harness = self.inner.registry.resolve(harness_id)?;
+        if let Some(session) = self.inner.resume_for(chat_id, &request.cwd) {
+            match harness
+                .rewind_point(&session, target, &prompt)
+                .await
+                .map_err(|e| EngineError::Other(format!("Couldn't rewind: {e}")))?
+            {
+                Some(at) => {
+                    request.resume = Some(session);
+                    request.resume_at = Some(at);
+                }
+                // The edited message opened the conversation: start over.
+                None => self.inner.drop_harness_session(chat_id, &request.cwd),
+            }
+        }
+        let removed = handle
+            .truncate_from(target)
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        tracing::info!(chat = %chat_id, removed, "rewound to before an earlier message");
+        Ok(())
+    }
+
     /// Tear the chat's live runtime down (protocol interrupt, then the
     /// child). The run settles with a synthetic `Done{interrupted}` and its
     /// streaming entry stamped `aborted`; this waits (bounded) for that
@@ -1251,6 +1318,9 @@ impl SessionsEngine {
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
+                            rewind_to: None,
+                            prompt_id: None,
+                            resume_at: None,
                             worktree: None,
                         })
                     });
@@ -1608,6 +1678,21 @@ impl Inner {
         );
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd);
+        }
+    }
+
+    /// A rewind to the opening message: the next run starts a fresh harness
+    /// session (the empty-id tombstone stops every resume source).
+    fn drop_harness_session(&self, chat_id: &str, cwd: &str) {
+        lock(&self.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: String::new(),
+                cwd: cwd.to_string(),
+            },
+        );
+        if let Some(ws) = self.workspace() {
+            ws.set_chat_harness_session(chat_id, "", cwd);
         }
     }
 
@@ -2211,6 +2296,9 @@ async fn drive_run(
     // the event loop) can take ownership.
     let mut retry_request = Some(RunRequest {
         resume: None,
+        rewind_to: None,
+        prompt_id: None,
+        resume_at: None,
         ..request.clone()
     });
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
@@ -3745,6 +3833,9 @@ mod tests {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             resume: None,
+            rewind_to: None,
+            prompt_id: None,
+            resume_at: None,
             attachments: Vec::new(),
             worktree: None,
         }

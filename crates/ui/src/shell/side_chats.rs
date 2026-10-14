@@ -240,6 +240,9 @@ impl Shell {
                         } => transcript.update(cx, |t, cx| {
                             t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                         }),
+                        ComposerEvent::EditChanged(message_id) => transcript.update(cx, |t, cx| {
+                            t.preview_rewind(message_id.as_deref(), cx)
+                        }),
                     }
                 }
             }),
