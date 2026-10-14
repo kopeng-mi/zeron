@@ -20,12 +20,19 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
     for model in data["models"].as_array().into_iter().flatten() {
         let provider = string(model, "provider");
         let id = string(model, "id");
-        process
+        // Pi refreshes provider catalogs after startup, so a listed model can
+        // vanish before we select it. Skip it rather than lose the whole list.
+        if let Err(error) = process
             .query(
                 json!({"type":"set_model","provider":provider,"modelId":id}),
                 &mut backlog,
             )
-            .await?;
+            .await
+        {
+            tracing::warn!(%error, provider, id, "Pi model vanished during discovery");
+            backlog.clear();
+            continue;
+        }
         let supported = process
             .query(
                 json!({"type":"get_available_thinking_levels"}),
