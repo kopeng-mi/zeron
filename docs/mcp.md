@@ -103,6 +103,15 @@ the copy lists as a sibling. The file explorer's footer lists a chat's
 
 ## Tools
 
+For what agents see and how to use the tools, read the
+[agent-to-agent guide](mcp-guide.md). The server lists a different tool set
+per role (orchestrator, subagent, free; `crates/mcp/src/a2a.rs`) and refuses
+calls outside it. `read_chat`/`read_subagent` write Markdown files and return
+the path; `chat_status` reports children; a subagent's `send_message` goes
+to its parent through `DeliverEvent`, and `wait: true` long-polls
+`AwaitAgentReply` until the parent's `send_message` lands through
+`DeliverAgentReply`.
+
 Chats are referenced by full id, a unique id prefix, or an exact title.
 Projects by id, path, display name, or unique path suffix. Devices by id or
 name (default: the local engine's device).
@@ -122,11 +131,13 @@ name (default: the local engine's device).
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
 | `read_subagent`    | chat transcript for spawn chips, then the subagent's frozen blob (`FetchToolBlob`) or live doc |
 | `search_chats`     | `WatchChats` + per-chat `WatchDocMessages`, scored locally |
-| `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
+| `send_message`     | `DeliverAgentReply` to a waiting child, else `QueueCommand` Run / Steer / RespondInput (pending question), Interrupt first with `interrupt`; subagents: `DeliverEvent` to the parent |
+| `chat_status`      | `WatchChats` + `WatchSessions`, plus the transcript for a question or error |
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
-| `interrupt_chat`   | `QueueCommand` Interrupt                                  |
-| `respond_to_input` | `QueueCommand` RespondInput                               |
+| `stop_chat`        | `QueueCommand` Interrupt (alias `interrupt_chat`)         |
+| `respond_to_input` | `QueueCommand` RespondInput (unlisted; `send_message` answers) |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `zeron_help`       | Local: the guide's topics                                 |
 
 A subagent's work never lands in its parent's transcript: the parent keeps
 one spawn chip, and the subagent streams into its own doc
