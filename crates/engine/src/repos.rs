@@ -1252,12 +1252,22 @@ impl Repos {
         Some(path.to_string_lossy().into_owned())
     }
 
+    /// Every checkout of the repository at `repo_path`, main one first.
+    /// NUL-terminated so a `\n` in a worktree's path can't forge another entry.
     async fn worktree_paths(&self, repo_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
-        let out = self
-            .git(&["worktree", "list", "--porcelain"], Some(repo_path))
-            .await?;
+        let out = match self
+            .git(&["worktree", "list", "--porcelain", "-z"], Some(repo_path))
+            .await
+        {
+            Ok(out) => out,
+            // Git before 2.36 has no `-z`.
+            Err(_) => self
+                .git(&["worktree", "list", "--porcelain"], Some(repo_path))
+                .await?
+                .replace('\n', "\0"),
+        };
         Ok(out
-            .lines()
+            .split('\0')
             .filter_map(|line| line.strip_prefix("worktree "))
             .map(PathBuf::from)
             .collect())
@@ -3313,6 +3323,18 @@ tmpfs /run tmpfs rw 0 0
                 "{}",
                 checkout.display()
             );
+        }
+        // A newline in a worktree's path must not smuggle in another entry.
+        #[cfg(unix)]
+        {
+            let forged = tmp
+                .path()
+                .join(format!("forged\nworktree {}", elsewhere.display()));
+            git(
+                &root,
+                &["worktree", "add", "--detach", &forged.to_string_lossy()],
+            )
+            .await;
         }
         assert!(repos.workspace_checkout(&root, &elsewhere).await.is_none());
     }

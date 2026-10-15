@@ -41,10 +41,11 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "search_chats",
     "wait_for_turn",
     "archive_chat",
+    "show_visual",
 ];
 
 /// Tools a subagent lists.
-pub const SUBAGENT_TOOLS: &[&str] = &["whoami", "zeron_help", "send_message", "read_chat", "get_chat"];
+pub const SUBAGENT_TOOLS: &[&str] = &["whoami", "zeron_help", "send_message", "read_chat", "get_chat", "show_visual"];
 
 /// Old names still answered (never listed) so existing prompts keep working.
 pub fn canonical(name: &str) -> &str {
@@ -64,6 +65,10 @@ impl Role {
 
     /// Whether `name` (already canonical) may be called.
     pub fn allows(&self, name: &str) -> bool {
+        // show_visual draws in the calling chat, so it needs one.
+        if name == "show_visual" && matches!(self, Role::Free) {
+            return false;
+        }
         self.tools().contains(&name)
             || (name == "respond_to_input" && !matches!(self, Role::Subagent { .. }))
     }

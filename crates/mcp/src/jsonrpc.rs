@@ -52,7 +52,14 @@ list_devices, then list_projects, list_harnesses and list_models for a \
 device; a project fixes its host. Without project or device, chats are \
 created on the local engine. If a notice says a chat is waiting for an \
 answer, answer it with send_message. chat_status shows every child at once; stop_chat stops one; zeron_help has the full guide. archive_chat tidies up children \
-you no longer need.";
+you no longer need.\n\
+\n\
+When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
+`show_visual` is available, write a Luau visual script and show it with `show_visual` before \
+your final reply. Zeron renders it with its own native interface and enforces its style: \
+content sits directly on the chat with no cards or boxed panels, text uses the interface font \
+and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
+The reader sees the visual above that reply, so don't announce or restate it.";
 
 const SUBAGENT_INSTRUCTIONS: &str = "You are a subagent: another Zeron chat (your parent, the orchestrator) gave you this task. Do the work and write your result as your final message; it goes to your parent automatically when your turn ends. send_message reaches only your parent: use it for a question (wait: true if you can't continue without the answer) or a finding it should know now, not for your final report or progress pings. read_chat writes your parent's, a sibling's or your own transcript to a file. zeron_help explains more.";
 
