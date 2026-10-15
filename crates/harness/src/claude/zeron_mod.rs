@@ -62,6 +62,17 @@ pub(crate) fn dir() -> Option<PathBuf> {
     DIR.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
+/// Live subagent states from a `zeron-agents:` line: agent (task) id → state.
+pub(crate) fn parse_agents(text: &str) -> Option<Vec<(String, String)>> {
+    #[derive(Deserialize)]
+    struct Agent {
+        id: String,
+        status: String,
+    }
+    let agents: Vec<Agent> = serde_json::from_str(text.strip_prefix("zeron-agents:")?).ok()?;
+    Some(agents.into_iter().map(|a| (a.id, a.status)).collect())
+}
+
 /// One turn's report.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Report {
@@ -140,6 +151,16 @@ mod tests {
     }
 
     #[test]
+    fn reads_live_agent_states() {
+        assert_eq!(
+            parse_agents(r#"zeron-agents:[{"id":"a0e6","description":"x","status":"waiting"}]"#),
+            Some(vec![("a0e6".to_owned(), "waiting".to_owned())])
+        );
+        assert_eq!(parse_agents("zeron-agents:[]"), Some(vec![]));
+        assert_eq!(parse_agents("zeron:{}"), None);
+    }
+
+    #[test]
     fn ignores_other_lines() {
         assert_eq!(parse("hello"), None);
         assert_eq!(parse("zeron:not json"), None);
@@ -152,7 +173,10 @@ mod tests {
         write_files(tmp.path()).unwrap();
         write_files(tmp.path()).unwrap();
         for (name, text) in FILES {
-            assert_eq!(std::fs::read_to_string(tmp.path().join(name)).unwrap(), *text);
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join(name)).unwrap(),
+                *text
+            );
         }
     }
 }

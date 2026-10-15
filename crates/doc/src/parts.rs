@@ -523,6 +523,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::CacheStats { .. }
         | AgentEvent::RateLimits { .. }
         | AgentEvent::ContextDetail { .. }
+        | AgentEvent::SubagentActivity { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::UserMessage { .. } => {}
     }

@@ -775,6 +775,13 @@ pub enum AgentEvent {
         breakdown: Option<ContextBreakdown>,
         cost_micros: Option<u64>,
     },
+    /// Live states of the run's subagents, keyed by spawning tool-use id
+    /// (`running`, `waiting`, `idle`...). Absent ones have settled. Never
+    /// persisted.
+    #[serde(rename_all = "camelCase")]
+    SubagentActivity {
+        states: std::collections::BTreeMap<String, String>,
+    },
     /// The plan's rate windows as the provider last reported them. Never
     /// persisted to docs as a part.
     #[serde(rename_all = "camelCase")]

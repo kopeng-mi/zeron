@@ -117,6 +117,9 @@ pub mod methods {
     /// Stream of `{chatId: residentBytes}` for every chat with a live agent
     /// process on this engine, sampled every few seconds.
     pub const WATCH_AGENT_RESOURCES: &str = "WatchAgentResources";
+    /// Stream of `{subagentDocId: state}` (`waiting`, `idle`...) for live
+    /// Claude subagents on this engine. Never persisted.
+    pub const WATCH_SUBAGENT_ACTIVITY: &str = "WatchSubagentActivity";
     /// Retype a queued message; empty text deletes it.
     /// `{ chatId, id, text }` → `{ changed }`.
     pub const UPDATE_QUEUED_MESSAGE: &str = "UpdateQueuedMessage";

@@ -225,6 +225,9 @@ struct Inner {
     sessions_tx: watch::Sender<Vec<Session>>,
     /// Resident bytes of each chat's live agent process tree on this host.
     resources_tx: watch::Sender<std::collections::BTreeMap<String, u64>>,
+    /// chat id → {subagent doc id → live state}, flattened for viewers.
+    activity: Mutex<HashMap<String, std::collections::BTreeMap<String, String>>>,
+    activity_tx: watch::Sender<std::collections::BTreeMap<String, String>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -275,6 +278,7 @@ impl SessionsEngine {
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
         let (resources_tx, _) = watch::channel(std::collections::BTreeMap::new());
+        let (activity_tx, _) = watch::channel(std::collections::BTreeMap::new());
         Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -290,6 +294,8 @@ impl SessionsEngine {
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
                 resources_tx,
+                activity: Mutex::new(HashMap::new()),
+                activity_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -421,6 +427,13 @@ impl SessionsEngine {
     /// Memory of each chat's live agent on this host (`WatchAgentResources`).
     pub fn watch_resources(&self) -> watch::Receiver<std::collections::BTreeMap<String, u64>> {
         self.inner.resources_tx.subscribe()
+    }
+
+    /// Live subagent states on this host (`WatchSubagentActivity`).
+    pub fn watch_subagent_activity(
+        &self,
+    ) -> watch::Receiver<std::collections::BTreeMap<String, String>> {
+        self.inner.activity_tx.subscribe()
     }
 
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
@@ -1993,6 +2006,32 @@ fn note_fork_history_session(doc: &SessionDoc, carried: bool, session_id: &str) 
 }
 
 impl Inner {
+    /// Replace `chat_id`'s live subagent states and tell viewers.
+    fn set_subagent_activity(
+        &self,
+        chat_id: &str,
+        states: std::collections::BTreeMap<String, String>,
+    ) {
+        let mut activity = lock(&self.activity);
+        if states.is_empty() {
+            activity.remove(chat_id);
+        } else {
+            activity.insert(chat_id.to_owned(), states);
+        }
+        let flat: std::collections::BTreeMap<String, String> = activity
+            .values()
+            .flat_map(|states| states.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .collect();
+        drop(activity);
+        self.activity_tx.send_if_modified(|current| {
+            let changed = *current != flat;
+            if changed {
+                *current = flat;
+            }
+            changed
+        });
+    }
+
     /// `prompt` with the conversation a side chat's provider session lacks in
     /// front of it, or `None` when it lacks nothing. A fresh session gets the
     /// whole transcript (`current` excluded); a continued one only the fork's
@@ -3206,6 +3245,16 @@ async fn drive_run(
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
                 tracing::warn!(%chat_id, error = %err, "context usage write failed");
             }
+            continue;
+        }
+        if let AgentEvent::SubagentActivity { states } = &event {
+            inner.set_subagent_activity(
+                &chat_id,
+                states
+                    .iter()
+                    .map(|(spawn, state)| (subagent_doc_id(&chat_id, spawn), state.clone()))
+                    .collect(),
+            );
             continue;
         }
         if let AgentEvent::ContextDetail {

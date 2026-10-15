@@ -390,6 +390,16 @@ impl Normalizer {
                 if f.plugin.as_deref() != Some(super::zeron_mod::PLUGIN) {
                     return Vec::new();
                 }
+                if let Some(agents) = f.text.as_deref().and_then(super::zeron_mod::parse_agents) {
+                    // Agent ids are task ids; rows are keyed by the spawn.
+                    let states = agents
+                        .into_iter()
+                        .filter_map(|(task, state)| {
+                            Some((self.agent_tasks.get(&task)?.clone(), state))
+                        })
+                        .collect();
+                    return vec![AgentEvent::SubagentActivity { states }];
+                }
                 let Some(report) = f.text.as_deref().and_then(super::zeron_mod::parse) else {
                     return Vec::new();
                 };
@@ -1131,6 +1141,26 @@ mod tests {
         // Another plugin's lines are ignored.
         let other = r#"{"type":"system","subtype":"ui_log","plugin":"other","text":"zeron:{}"}"#;
         assert!(norm.normalize(parse(other), false).is_empty());
+    }
+
+    #[test]
+    fn live_agent_states_are_keyed_by_their_spawn() {
+        let mut norm = Normalizer::new();
+        let parse = |raw: &str| crate::claude::wire::parse_frame(raw).unwrap();
+        norm.normalize(
+            parse(r#"{"type":"system","subtype":"task_started","task_id":"a0e6","tool_use_id":"toolu_1","subagent_type":"general-purpose"}"#),
+            false,
+        );
+        let events = norm.normalize(
+            parse(r#"{"type":"system","subtype":"ui_log","plugin":"zeron","text":"zeron-agents:[{\"id\":\"a0e6\",\"status\":\"waiting\"},{\"id\":\"unknown\",\"status\":\"running\"}]"}"#),
+            false,
+        );
+        assert_eq!(
+            events,
+            [AgentEvent::SubagentActivity {
+                states: [("toolu_1".to_owned(), "waiting".to_owned())].into(),
+            }]
+        );
     }
 
     #[test]

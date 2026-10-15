@@ -2,6 +2,8 @@
 // `zeron:` JSON line (a `system`/`ui_log` frame on Zeron's stdout stream) with
 // the exact context use, session cost, the turn's prompt-cache totals
 // (subagents included) and an estimated breakdown of what fills the context.
+// While subagents run it also logs a `zeron-agents:` line whenever their
+// live states (running, waiting, idle...) change, checked every few seconds.
 // It never changes a prompt, a request or a tool call.
 
 // Characters per token for the breakdown estimate; `other` (tool schemas,
@@ -17,7 +19,23 @@ let reminders = 0
 const len = (text) => (typeof text === 'string' ? text.length : 0)
 const tokens = (chars) => Math.round(chars / CHARS_PER_TOKEN)
 
+const AGENT_POLL_MS = 5000
+let agents = '[]'
+
+async function reportAgents($) {
+  const list = (await $.agent.list()).map((a) => ({ id: a.id, status: a.status }))
+  const text = JSON.stringify(list)
+  if (text === agents) return
+  agents = text
+  $.ui.log('zeron-agents:' + text)
+}
+
 export function register(on) {
+  on('session.start', async ($, e, next) => {
+    $.clock.every(AGENT_POLL_MS, () => reportAgents($))
+    return next(e)
+  })
+
   on('turn.step', async function* ($, e, next) {
     const result = yield* next(e)
     const u = result && result.usage

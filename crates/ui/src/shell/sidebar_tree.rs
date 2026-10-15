@@ -178,10 +178,7 @@ impl Shell {
                             .items_center()
                             .gap(px(6.0))
                             .px(px(Theme::SPACE_SM))
-                            .child(dot(spaces::status_dot_color(
-                                ChatIndicator::Working,
-                                theme,
-                            )))
+                            .child(dot(spaces::status_dot_color(ChatIndicator::Working, theme)))
                             .child(muted(
                                 theme,
                                 format!("{running} subagents running · open the chat to list them"),
@@ -255,20 +252,35 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (color, label) = match agent.status {
-            Some(SubagentStatus::Running) => (
-                spaces::status_dot_color(ChatIndicator::Working, theme),
-                "Working",
+        let live = self
+            .state
+            .read(cx)
+            .subagent_activity
+            .get(&agent.doc_id)
+            .cloned();
+        let (color, label) = match (agent.status, live.as_deref()) {
+            (Some(SubagentStatus::Running), Some("waiting")) => (
+                spaces::status_dot_color(ChatIndicator::AwaitingInput, theme),
+                "Waiting",
             ),
-            Some(SubagentStatus::Done) => (
-                spaces::status_dot_color(ChatIndicator::Completed, theme),
-                "Done",
-            ),
-            Some(SubagentStatus::Failed) => (
-                spaces::status_dot_color(ChatIndicator::Errored, theme),
-                "Failed",
-            ),
-            None => (spaces::status_dot_color(ChatIndicator::Idle, theme), ""),
+            (Some(SubagentStatus::Running), Some("idle")) => {
+                (spaces::status_dot_color(ChatIndicator::Idle, theme), "Idle")
+            }
+            (status, _) => match status {
+                Some(SubagentStatus::Running) => (
+                    spaces::status_dot_color(ChatIndicator::Working, theme),
+                    "Working",
+                ),
+                Some(SubagentStatus::Done) => (
+                    spaces::status_dot_color(ChatIndicator::Completed, theme),
+                    "Done",
+                ),
+                Some(SubagentStatus::Failed) => (
+                    spaces::status_dot_color(ChatIndicator::Errored, theme),
+                    "Failed",
+                ),
+                None => (spaces::status_dot_color(ChatIndicator::Idle, theme), ""),
+            },
         };
         let parent_id = parent.to_owned();
         let frozen = agent.frozen();
@@ -332,7 +344,13 @@ impl Shell {
 
 /// One line of the tree: a curved elbow off the trunk reaching down to
 /// `reach`, the trunk running on below unless this is the last line.
-fn branch(line: gpui::Hsla, height: f32, reach: f32, last: bool, content: AnyElement) -> AnyElement {
+fn branch(
+    line: gpui::Hsla,
+    height: f32,
+    reach: f32,
+    last: bool,
+    content: AnyElement,
+) -> AnyElement {
     div()
         .relative()
         .w_full()

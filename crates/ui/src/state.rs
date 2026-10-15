@@ -820,6 +820,9 @@ pub struct AppState {
     /// Resident bytes of each chat's live agent on this device's engine
     /// (`WatchAgentResources`), for the status line and sidebar rows.
     pub agent_memory: std::collections::BTreeMap<String, u64>,
+    /// Live states of running Claude subagents on this device, by subagent
+    /// doc id (`waiting`, `idle`...; `WatchSubagentActivity`).
+    pub subagent_activity: std::collections::BTreeMap<String, String>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -953,6 +956,7 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             agent_memory: Default::default(),
+            subagent_activity: Default::default(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1364,6 +1368,15 @@ impl AppState {
     ) -> bool {
         let changed = self.agent_memory != memory;
         self.agent_memory = memory;
+        changed
+    }
+
+    pub fn apply_subagent_activity(
+        &mut self,
+        activity: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let changed = self.subagent_activity != activity;
+        self.subagent_activity = activity;
         changed
     }
 
@@ -2628,6 +2641,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_AGENT_RESOURCES,
                 AppState::apply_agent_resources,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SUBAGENT_ACTIVITY,
+                AppState::apply_subagent_activity,
             ),
             spawn_watch(
                 cx,
