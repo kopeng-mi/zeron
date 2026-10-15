@@ -147,6 +147,16 @@ pub fn active_account(
 }
 
 /// Loads (and switches) the accounts of the composer's target device.
+/// The context card's Compact row was clicked.
+pub struct CompactRequested;
+
+impl gpui::EventEmitter<CompactRequested> for AccountUsage {}
+
+/// Harnesses whose sessions take `/compact`.
+fn can_compact(harness: Option<HarnessId>) -> bool {
+    matches!(harness, Some(HarnessId::ClaudeCode | HarnessId::Codex))
+}
+
 pub struct AccountUsage {
     state: Entity<AppState>,
     /// `None` = this device, as in [`AccountsSnapshotCache`].
@@ -580,7 +590,24 @@ impl Render for AccountUsage {
             self.trigger(
                 chip,
                 FooterCard::Context,
-                move |_, cx| crate::context_usage::card(context, &Theme::of(cx).for_popup()),
+                move |usage, cx| {
+                    let theme = Theme::of(cx).for_popup();
+                    let card = crate::context_usage::card(context, &theme);
+                    if !can_compact(usage.harness) {
+                        return card;
+                    }
+                    card.child(
+                        div().px(px(4.0)).pb(px(4.0)).child(
+                            popover::menu_row(&theme, false, "context-compact")
+                                .id("context-compact")
+                                .child(SharedString::from("Compact context"))
+                                .on_click(cx.listener(|usage, _, _, cx| {
+                                    usage.dismiss(cx);
+                                    cx.emit(CompactRequested);
+                                })),
+                        ),
+                    )
+                },
                 cx,
             )
         });
@@ -656,6 +683,14 @@ mod tests {
         assert_eq!(merged.usage_windows[0].used_fraction, 0.41);
         // A window past its reset keeps the polled value.
         assert_eq!(merged.usage_windows[1].used_fraction, 0.2);
+    }
+
+    #[test]
+    fn compact_is_offered_where_the_harness_takes_it() {
+        assert!(can_compact(Some(HarnessId::ClaudeCode)));
+        assert!(can_compact(Some(HarnessId::Codex)));
+        assert!(!can_compact(Some(HarnessId::Pi)));
+        assert!(!can_compact(None));
     }
 
     #[test]

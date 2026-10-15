@@ -6161,6 +6161,7 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     _picker_focus: Subscription,
+    _compact: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
     dictation_activation: Option<Subscription>,
@@ -6251,6 +6252,12 @@ impl Composer {
             this.on_input_edited(cx);
             cx.notify();
         });
+        let compact = cx.subscribe(
+            &account_usage,
+            |this: &mut Self, _, _: &crate::account_usage::CompactRequested, cx| {
+                this.compact(cx)
+            },
+        );
         let picker_focus = cx.subscribe(
             &pickers,
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
@@ -6418,6 +6425,7 @@ impl Composer {
             account_usage,
             side_chat: false,
             _picker_focus: picker_focus,
+            _compact: compact,
             _input_events: input_events,
             _dictation_events: dictation_events,
             dictation_activation: None,
@@ -8873,6 +8881,30 @@ impl Composer {
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
+    /// Send `/compact` to the open chat, queued behind a running turn.
+    fn compact(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_none() {
+            return;
+        }
+        // `send` takes the composer's draft, attachments and edit with it.
+        let busy_composer = !self.input.read(cx).text().trim().is_empty()
+            || !self.staged().is_empty()
+            || !self.staged_appshots().is_empty()
+            || self.rewind_edit.is_some();
+        if busy_composer {
+            self.failure = Some("Send or clear the message first, then compact.".into());
+            self.failure_key = None;
+            cx.notify();
+            return;
+        }
+        let command = zeron_proto::invocation::Invocation::Command {
+            name: "compact".into(),
+        }
+        .link();
+        let busy = !matches!(self.button_mode(cx), SendButtonMode::Send);
+        self.send(command, busy, cx);
+    }
+
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
         if !self.check_reference_delivery(&text, cx) {
             return;
