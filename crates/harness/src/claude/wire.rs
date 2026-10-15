@@ -85,6 +85,11 @@ pub(crate) struct SystemFrame {
     /// `compact_boundary`: sizes around a `/compact` or auto-compaction.
     #[serde(default)]
     pub compact_metadata: Option<CompactMetadata>,
+    /// `ui_log`: the plugin that logged the line, and its text.
+    #[serde(default)]
+    pub plugin: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

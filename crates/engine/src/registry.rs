@@ -242,6 +242,10 @@ struct HarnessPrefsFile {
     /// `None` runs `pi`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pi_command: Option<String>,
+    /// `false` stops loading Zeron's Claude Code mod (context breakdown,
+    /// cost, cache totals). Hidden: no Settings row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude_mod: Option<bool>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -483,6 +487,11 @@ impl HarnessRegistry {
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
         let pi_command = loaded.pi_command.clone();
+        if let Err(err) =
+            zeron_harness::claude::zeron_mod::install(data_dir, loaded.claude_mod != Some(false))
+        {
+            tracing::warn!(error = %err, "couldn't install the Claude Code mod");
+        }
         *self.prefs() = loaded;
         *self
             .prefs_path

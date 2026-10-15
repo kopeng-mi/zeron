@@ -48,6 +48,7 @@ mod discovery;
 mod normalize;
 mod rewind;
 mod wire;
+pub mod zeron_mod;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,6 +234,10 @@ impl ClaudeHarness {
         ]
         .map(str::to_owned)
         .into();
+        if let Some(dir) = zeron_mod::dir() {
+            args.push("--plugin-dir".into());
+            args.push(dir.to_string_lossy().into_owned());
+        }
         if let Some(model) = model_arg(request) {
             args.push("--model".into());
             args.push(model);

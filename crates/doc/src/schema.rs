@@ -407,6 +407,22 @@ impl SessionDoc {
         self.write_context_usage(previous, next)
     }
 
+    /// Record the context's breakdown and the session cost. A missing value
+    /// keeps the stored one.
+    pub fn update_context_detail(
+        &self,
+        breakdown: Option<zeron_proto::ContextBreakdown>,
+        cost_micros: Option<u64>,
+    ) -> Result<(), DocError> {
+        let previous = self.context_usage().unwrap_or_default();
+        let next = zeron_proto::ContextUsage {
+            breakdown: breakdown.or(previous.breakdown),
+            cost_micros: cost_micros.or(previous.cost_micros),
+            ..previous
+        };
+        self.write_context_usage(previous, next)
+    }
+
     fn write_context_usage(
         &self,
         previous: zeron_proto::ContextUsage,

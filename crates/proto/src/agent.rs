@@ -768,6 +768,13 @@ pub enum AgentEvent {
     /// Never persisted to docs as a part.
     #[serde(rename_all = "camelCase")]
     CacheStats { stats: CacheStats },
+    /// The context's estimated breakdown and the session cost. Never
+    /// persisted to docs as a part.
+    #[serde(rename_all = "camelCase")]
+    ContextDetail {
+        breakdown: Option<ContextBreakdown>,
+        cost_micros: Option<u64>,
+    },
     /// The plan's rate windows as the provider last reported them. Never
     /// persisted to docs as a part.
     #[serde(rename_all = "camelCase")]
@@ -1075,6 +1082,31 @@ pub struct ContextUsage {
     pub five_hour: Option<RateWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<RateWindow>,
+    /// Estimated split of `tokens` (Claude, from Zeron's mod).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakdown: Option<ContextBreakdown>,
+    /// The session's cost so far, in millionths of a US dollar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<u64>,
+}
+
+/// What fills the context, in tokens, estimated from each part's text;
+/// `other` is what the measured total leaves (tool schemas, tool output).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBreakdown {
+    pub system: u64,
+    /// CLAUDE.md and other memory files.
+    pub memory: u64,
+    pub tools: u64,
+    pub mcp: u64,
+    /// Skill and agent listings.
+    pub skills: u64,
+    /// Reminders the agent's own runtime adds.
+    pub reminders: u64,
+    pub messages: u64,
+    #[serde(default)]
+    pub other: u64,
 }
 
 /// One turn's prompt-cache accounting.

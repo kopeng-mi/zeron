@@ -1,0 +1,5 @@
+{
+  "name": "zeron",
+  "version": "1.0.0",
+  "description": "Reports context, cost and cache use to Zeron. Read-only."
+}

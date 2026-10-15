@@ -3208,6 +3208,16 @@ async fn drive_run(
             }
             continue;
         }
+        if let AgentEvent::ContextDetail {
+            breakdown,
+            cost_micros,
+        } = &event
+        {
+            if let Err(err) = doc_ref.update_context_detail(*breakdown, *cost_micros) {
+                tracing::warn!(%chat_id, error = %err, "context detail write failed");
+            }
+            continue;
+        }
         // The status line's cache and plan-limit numbers ride the same
         // snapshot. The host stamps when the cache was written: its warmth
         // counts down from here.

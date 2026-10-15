@@ -255,6 +255,9 @@ pub(crate) struct Normalizer {
     streamed_text: bool,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
+    /// The TTL the last `result` reported: the mod's report arrives after
+    /// it and doesn't know the TTL.
+    last_ttl: Option<u32>,
 }
 
 impl Normalizer {
@@ -268,6 +271,7 @@ impl Normalizer {
             assistant_message_id: new_message_id(),
             streamed_text: false,
             session_id: None,
+            last_ttl: None,
         }
     }
 
@@ -382,6 +386,35 @@ impl Normalizer {
     /// a post-interrupt `result` into `Done { status: Interrupted }`.
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
         match frame {
+            Frame::System(f) if f.subtype == "ui_log" => {
+                if f.plugin.as_deref() != Some(super::zeron_mod::PLUGIN) {
+                    return Vec::new();
+                }
+                let Some(report) = f.text.as_deref().and_then(super::zeron_mod::parse) else {
+                    return Vec::new();
+                };
+                let mut out = vec![
+                    AgentEvent::ContextUsage {
+                        tokens: report.tokens,
+                        window: report.window,
+                    },
+                    AgentEvent::ContextDetail {
+                        breakdown: report.breakdown,
+                        cost_micros: report.cost_micros,
+                    },
+                ];
+                // The whole turn's totals, subagents' requests included,
+                // replace the `result`'s main-thread figures.
+                if let Some(totals) = report.cache {
+                    out.push(AgentEvent::CacheStats {
+                        stats: zeron_proto::CacheStats {
+                            ttl_secs: self.last_ttl,
+                            ..totals
+                        },
+                    });
+                }
+                out
+            }
             Frame::System(f) => {
                 // A background subagent's completion arrives as an UNTAGGED
                 // `task_notification` carrying the spawning tool's id — the
@@ -820,23 +853,23 @@ impl Normalizer {
                     output_tokens: f.usage.output_tokens,
                 };
                 let written = &f.usage.cache_creation;
-                let cache = AgentEvent::CacheStats {
-                    stats: zeron_proto::CacheStats {
-                        read: f.usage.cache_read_input_tokens,
-                        write: f.usage.cache_creation_input_tokens,
-                        input: f.usage.input_tokens,
-                        // A reads-only turn doesn't say; the host keeps the
-                        // last known TTL.
-                        ttl_secs: if written.ephemeral_1h_input_tokens > 0 {
-                            Some(3600)
-                        } else if written.ephemeral_5m_input_tokens > 0 {
-                            Some(300)
-                        } else {
-                            None
-                        },
-                        at_ms: 0,
+                let measured = zeron_proto::CacheStats {
+                    read: f.usage.cache_read_input_tokens,
+                    write: f.usage.cache_creation_input_tokens,
+                    input: f.usage.input_tokens,
+                    // A reads-only turn doesn't say; the host keeps the
+                    // last known TTL.
+                    ttl_secs: if written.ephemeral_1h_input_tokens > 0 {
+                        Some(3600)
+                    } else if written.ephemeral_5m_input_tokens > 0 {
+                        Some(300)
+                    } else {
+                        None
                     },
+                    at_ms: 0,
                 };
+                self.last_ttl = measured.ttl_secs.or(self.last_ttl);
+                let cache = AgentEvent::CacheStats { stats: measured };
                 let aborted = interrupted
                     || f
                         .terminal_reason
@@ -1063,6 +1096,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!((hour.write, hour.ttl_secs), (800, Some(3600)));
+    }
+
+    #[test]
+    fn the_zeron_mod_reports_context_cost_and_whole_turn_cache() {
+        let mut norm = Normalizer::new();
+        let parse = |raw: &str| crate::claude::wire::parse_frame(raw).unwrap();
+        // The turn's result comes first and carries the TTL.
+        let result = r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"cache_creation_input_tokens":50,"cache_read_input_tokens":300,"output_tokens":1,"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":0}}}"#;
+        norm.normalize(parse(result), false);
+        // Captured from claude 2.1.300 with the bundled mod.
+        let report = r#"{"type":"system","subtype":"ui_log","plugin":"zeron","text":"zeron:{\"v\":1,\"context\":{\"tokens\":20340,\"window\":1000000,\"percent\":2},\"cost\":{\"usd\":0.41},\"cache\":{\"read\":18022,\"write\":2316,\"input\":2},\"breakdown\":{\"system\":1908,\"memory\":1373,\"tools\":1820,\"mcp\":0,\"skills\":1088,\"reminders\":1994,\"messages\":20,\"other\":12137}}"}"#;
+        let events = norm.normalize(parse(report), false);
+        assert_eq!(
+            events[0],
+            AgentEvent::ContextUsage {
+                tokens: Some(20340),
+                window: Some(1_000_000)
+            }
+        );
+        let AgentEvent::ContextDetail {
+            breakdown,
+            cost_micros,
+        } = &events[1]
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*cost_micros, Some(410_000));
+        assert_eq!(breakdown.unwrap().other, 12137);
+        let AgentEvent::CacheStats { stats } = &events[2] else {
+            panic!("{events:?}");
+        };
+        assert_eq!((stats.read, stats.write, stats.ttl_secs), (18022, 2316, Some(3600)));
+        // Another plugin's lines are ignored.
+        let other = r#"{"type":"system","subtype":"ui_log","plugin":"other","text":"zeron:{}"}"#;
+        assert!(norm.normalize(parse(other), false).is_empty());
     }
 
     #[test]
