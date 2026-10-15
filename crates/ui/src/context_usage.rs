@@ -148,8 +148,47 @@ fn details(usage: Option<ContextUsage>) -> String {
     }
 }
 
+/// `12.3k`-style short token count.
+fn short_tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..10_000 => format!("{:.1}k", count as f64 / 1_000.0),
+        10_000..1_000_000 => format!("{}k", (count as f64 / 1_000.0).round() as u64),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+    }
+}
+
+/// The breakdown's rows, largest first, with each part's share of the used
+/// tokens. Empty parts are left out.
+fn breakdown_rows(usage: Option<ContextUsage>) -> Vec<(&'static str, String, u32)> {
+    let Some(b) = usage.and_then(|u| u.breakdown) else {
+        return Vec::new();
+    };
+    let mut parts = [
+        ("Messages", b.messages),
+        ("System prompt", b.system),
+        ("Tools", b.tools),
+        ("MCP tools", b.mcp),
+        ("Memory files", b.memory),
+        ("Skills & agents", b.skills),
+        ("Reminders", b.reminders),
+        ("Tool schemas & output", b.other),
+    ];
+    parts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let total: u64 = parts.iter().map(|(_, n)| n).sum();
+    parts
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(label, n)| {
+            let share = (n as f64 * 100.0 / total.max(1) as f64).round() as u32;
+            (label, short_tokens(n), share)
+        })
+        .collect()
+}
+
 /// The context ring's popover content.
 pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
+    let rows = breakdown_rows(usage);
     crate::popover::popover_card(theme)
         .flex()
         .flex_col()
@@ -164,6 +203,34 @@ pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
                 .text_color(theme.text_muted)
                 .child(SharedString::from(details(usage))),
         )
+        .when(!rows.is_empty(), |card| {
+            card.child(crate::popover::menu_heading(theme, "What fills it (estimated)"))
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .pb(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .text_size(px(12.0))
+                        .line_height(px(19.0))
+                        .whitespace_nowrap()
+                        .children(rows.into_iter().map(|(label, tokens, share)| {
+                            div()
+                                .flex()
+                                .gap(px(12.0))
+                                .child(div().flex_1().text_color(theme.text_muted).child(label))
+                                .child(div().text_color(theme.text).child(SharedString::from(tokens)))
+                                .child(
+                                    div()
+                                        .w(px(34.0))
+                                        .flex()
+                                        .justify_end()
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from(format!("{share}%"))),
+                                )
+                        })),
+                )
+        })
 }
 
 #[cfg(test)]
@@ -216,6 +283,30 @@ mod tests {
             }))
             .contains("limit not reported")
         );
+    }
+
+    #[test]
+    fn breakdown_lists_parts_largest_first() {
+        let usage = ContextUsage {
+            breakdown: Some(zeron_proto::ContextBreakdown {
+                system: 2_000,
+                tools: 12_400,
+                messages: 25_600,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            breakdown_rows(Some(usage)),
+            [
+                ("Messages", "26k".to_owned(), 64),
+                ("Tools", "12k".to_owned(), 31),
+                ("System prompt", "2.0k".to_owned(), 5),
+            ]
+        );
+        assert!(breakdown_rows(None).is_empty());
+        assert_eq!(short_tokens(999), "999");
+        assert_eq!(short_tokens(1_260_000), "1.3M");
     }
 
     #[test]

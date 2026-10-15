@@ -80,6 +80,28 @@ pub fn cache_status(
     now_ms: i64,
 ) -> Option<String> {
     let memory = memory_bytes.map(memory_label);
+    let cost = usage.and_then(|u| u.cost_micros).map(cost_label);
+    let text = cache_text(usage, memory, now_ms);
+    match (text, cost) {
+        (Some(text), Some(cost)) => Some(format!("{text} · {cost}")),
+        (text, cost) => text.or(cost),
+    }
+}
+
+/// `$0.41`, or `<$0.01` for a session that has barely started.
+fn cost_label(micros: u64) -> String {
+    if micros < 10_000 {
+        "<$0.01".into()
+    } else {
+        format!("${:.2}", micros as f64 / 1_000_000.0)
+    }
+}
+
+fn cache_text(
+    usage: Option<zeron_proto::ContextUsage>,
+    memory: Option<String>,
+    now_ms: i64,
+) -> Option<String> {
     let Some(cache) = usage
         .and_then(|u| u.cache)
         .filter(|c| c.hit_fraction().is_some())
@@ -657,6 +679,18 @@ mod tests {
             "142 MB · cache 90% · warm 58m"
         );
         assert_eq!(cache_status(None, Some(3 * 1024 * 1024 * 1024), 0).unwrap(), "3.0 GB");
+        let costly = zeron_proto::ContextUsage {
+            cost_micros: Some(412_345),
+            ..usage(Some(3600))
+        };
+        assert_eq!(
+            cache_status(Some(costly), Some(142 * 1024 * 1024), 120_000).unwrap(),
+            "142 MB · cache 90% · warm 58m · $0.41"
+        );
+        assert_eq!(
+            cache_status(Some(zeron_proto::ContextUsage { cost_micros: Some(5), ..Default::default() }), None, 0).unwrap(),
+            "<$0.01"
+        );
     }
 
     #[test]
